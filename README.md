@@ -1,6 +1,6 @@
 # Dependency Graph Viewer
 
-Affiche le graphe de dépendances (imports) d'un projet **TS / JS / Vue / Svelte / NestJS** en 2D ou en 3D.
+Affiche le graphe de dépendances (imports) d'un projet **TS / JS / Vue / Svelte / NestJS** en organigramme, 2D ou 3D : cycles, incidents, simulation de panne, impact Git, règles d'architecture.
 
 ## Utilisation
 
@@ -21,32 +21,57 @@ Couleurs : module Nest (bleu), controller (violet), service (turquoise), Vue (ve
 
 ## Filtres
 
-Barre sous la barre d'outils : cases par type de fichier, champ de chemin (`auth, users, !shared` : mots séparés par des virgules, `!` exclut), « Masquer importés par ≥ N » (retire les utilitaires omniprésents) et « Masquer isolés ». Les filtres ne changent que l'affichage : les impacts sont toujours calculés sur le projet entier.
+Cases par type de fichier, champ de chemin (`auth, users, !shared` : mots séparés par des virgules, `!` exclut), « Masquer importés par ≥ N », « Masquer isolés », « Masquer tests » (actif par défaut, `depgraph.hideTestsByDefault`) et **Regrouper** par dossier (niveau 1 à 4 ; clic droit sur un dossier pour le déplier). Les filtres ne changent que l'affichage : les impacts sont toujours calculés sur le projet entier.
+
+## Vues
+
+Le sélecteur **Vue** bascule entre **Fichiers**, **Modules NestJS** (décorateurs `@Module` : imports entre modules, providers, controllers, exports ; clic droit = ouvre la ligne du décorateur) et **Packages** (monorepo : dépendances entre packages, détecté dès 2 `package.json`).
+
+## Fonctions
+
+- **Rafraîchissement automatique** à l'enregistrement, la création et la suppression de fichiers (`depgraph.autoRefresh`) ; caméra et sélection sont conservées.
+- **Fichier actif** : anneau cyan sur le fichier ouvert ; « Suivre le fichier actif » recentre la vue.
+- **Impact Git** : modifications non commitées, branche vs `main`, ou depuis un tag/commit. Fichiers modifiés en jaune, impactés en orange, et la liste des **tests à relancer** (copiable).
+- **Comparer…** le projet actuel à une branche, un tag ou un commit : nœuds/liens ajoutés en vert, supprimés en rouge (fantômes).
+- **Exporter** la vue en Mermaid (`.md`, s'affiche dans GitHub), SVG ou PNG.
+- **IA** (résumer un fichier, suggérer des simulations, analyser le risque d'un diff) : utilise les modèles de VS Code (GitHub Copilot), **sans clé API**. Sans modèle disponible, ou avec `depgraph.aiProvider = copy`, le prompt est copié dans le presse-papiers pour le coller dans Claude. Une confirmation est demandée avant le premier envoi de code.
+
+## Règles d'architecture
+
+Fichier `.depgraph-rules.json` (ou `.depgraph/rules.json`) :
+
+```json
+{
+  "rules": [
+    { "name": "Un controller n'importe pas un repository", "from": "**/*.controller.ts", "notTo": "**/*.repository.ts" },
+    { "name": "Le domaine ne dépend que du domaine", "from": "src/domain/**", "onlyTo": ["src/domain/**"] }
+  ]
+}
+```
+
+Les violations apparaissent en violet (liens, nœuds, panneau latéral). Exemple d'usage en CI :
+
+```bash
+curl -sL https://github.com/Nikuspokus/depgraph-viewer/releases/latest/download/cli.js -o depgraph-check.js
+node depgraph-check.js . --fail-on-cycles   # code 1 si violation (ou cycle)
+```
 
 ## Mises à jour
 
-Au démarrage de VS Code (au plus toutes les 12 h), l'extension regarde la dernière release GitHub du dépôt. S'il y a une version plus récente, elle propose **Installer** : le `.vsix` est téléchargé, son empreinte SHA-256 est vérifiée, puis installé. La commande `Dependency Graph: Check for Updates` force la vérification, et le réglage `depgraph.autoCheckUpdates` la désactive.
+Au démarrage de VS Code (au plus toutes les 12 h), l'extension regarde la dernière release GitHub. S'il y a une version plus récente, elle propose **Installer** : le `.vsix` est téléchargé, son empreinte SHA-256 est vérifiée, puis installé. `Dependency Graph: Check for Updates` force la vérification (`depgraph.autoCheckUpdates` la désactive).
 
-Publier une version : changer `version` dans `package.json`, commiter et pousser sur `main`. GitHub Actions construit le `.vsix` et crée la release `vX.Y.Z` (si cette version n'en a pas déjà une).
+Publier : changer `version` dans `package.json`, commiter, pousser sur `main` ; GitHub Actions teste, construit le `.vsix` et crée la release.
 
 ## Incidents
 
-Crée un fichier `incidents.json` (ou `.depgraph/incidents.json`) à la racine du projet :
+`incidents.json` (ou `.depgraph/incidents.json`) à la racine du projet :
 
 ```json
-[
-  { "file": "src/auth/auth.service.ts", "title": "Timeout sur login", "severity": "high" }
-]
+[ { "file": "src/auth/auth.service.ts", "line": 42, "title": "Timeout sur login", "severity": "high" } ]
 ```
 
-`severity` : `low`, `medium` ou `high`. Les fichiers qui n'existent pas sont ignorés.
+## Limites
 
-## Réglages
-
-- `depgraph.excludeDirs` : dossiers supplémentaires à ignorer.
-- `depgraph.includeTests` : inclure `*.spec.*` / `*.test.*` (désactivé par défaut).
-
-## Limites de la v0.1
-
-- Analyse **statique** des imports uniquement (pas d'injection de dépendances Nest résolue, pas de runtime).
-- Les imports de paquets npm ne sont pas affichés ; les alias exotiques (hors `tsconfig paths`, `@/`, `~/`) ne sont pas résolus.
+- Analyse **statique** des imports (injection de dépendances Nest non résolue, pas de runtime) ; imports npm non affichés.
+- Le scan est complet à chaque rafraîchissement (pas incrémental) : sur un très gros projet, filtre ou exclus des dossiers.
+- Export Mermaid : au-delà de quelques centaines de nœuds, filtre ou regroupe avant.

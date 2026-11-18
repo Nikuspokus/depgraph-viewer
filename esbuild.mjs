@@ -29,3 +29,14 @@ await build({
   format: 'iife',
   target: 'es2022',
 });
+
+// Ligne de commande pour la CI : `node dist/cli.js [dossier]`
+await build({
+  ...common,
+  entryPoints: ['src/cli.ts'],
+  outfile: 'dist/cli.js',
+  platform: 'node',
+  format: 'cjs',
+  target: 'node18',
+  banner: { js: '#!/usr/bin/env node' },
+});

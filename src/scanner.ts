@@ -1,38 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as ts from 'typescript';
+import { GLink, GNode, Graph, Incident, Layer, NodeKind } from './shared/types';
+import { findCycles } from './shared/graph';
+import { parseNest } from './nest';
+import { checkRules, loadRules } from './rules';
 
-export type NodeKind = 'module' | 'controller' | 'service' | 'vue' | 'svelte' | 'other';
-
-export interface GNode {
-  id: string; // chemin relatif au workspace, séparateurs "/"
-  label: string;
-  dir: string;
-  kind: NodeKind;
-}
-
-export interface GLink {
-  source: string; // fichier qui importe
-  target: string; // fichier importé
-}
-
-export interface Incident {
-  file: string;
-  title: string;
-  severity?: 'low' | 'medium' | 'high';
-}
-
-export interface Graph {
-  nodes: GNode[];
-  links: GLink[];
-  cycles: string[][];
-  incidents: Incident[];
-  stats: { files: number; links: number; unresolved: number };
-}
+export { findCycles };
+export type { Graph, GNode, GLink, Incident, Layer };
 
 export interface ScanOptions {
   excludeDirs?: string[];
-  includeTests?: boolean;
 }
 
 const SRC_EXT = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte'];
@@ -41,12 +19,13 @@ const IGNORED_DIRS = new Set([
   'coverage', '.next', '.angular', '.idea', '.vscode', '.turbo', '.cache',
 ]);
 const TEST_RE = /\.(spec|test|stories)\.[cm]?[jt]sx?$/;
+const TEST_DIR_RE = /(^|\/)(__tests__|__mocks__)\//;
 
 function toPosix(p: string): string {
   return p.split(path.sep).join('/');
 }
 
-function walk(root: string, dir: string, opts: ScanOptions, out: string[]): void {
+function walk(root: string, dir: string, opts: ScanOptions, out: string[], pkgDirs: string[]): void {
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -58,12 +37,14 @@ function walk(root: string, dir: string, opts: ScanOptions, out: string[]): void
     const full = path.join(dir, e.name);
     if (e.isDirectory()) {
       if (IGNORED_DIRS.has(e.name) || extra.has(e.name)) continue;
-      walk(root, full, opts, out);
+      walk(root, full, opts, out, pkgDirs);
     } else if (e.isFile()) {
-      const ext = path.extname(e.name);
-      if (!SRC_EXT.includes(ext)) continue;
+      if (e.name === 'package.json') {
+        pkgDirs.push(toPosix(path.relative(root, dir)) || '.');
+        continue;
+      }
+      if (!SRC_EXT.includes(path.extname(e.name))) continue;
       if (e.name.endsWith('.d.ts')) continue;
-      if (!opts.includeTests && TEST_RE.test(e.name)) continue;
       out.push(toPosix(path.relative(root, full)));
     }
   }
@@ -121,11 +102,62 @@ function loadAliases(root: string): AliasConfig {
   return result;
 }
 
+// ---------- packages (monorepo) ----------
+interface Pkg {
+  dir: string; // "." pour la racine
+  name: string;
+  entry: string[];
+}
+
+function readPackages(root: string, pkgDirs: string[]): Pkg[] {
+  const out: Pkg[] = [];
+  for (const dir of pkgDirs) {
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(root, dir, 'package.json'), 'utf8'));
+      const entry = [j.source, j.module, j.main, j.types, j.typings].filter((x): x is string => typeof x === 'string');
+      const fallback = dir === '.' ? path.basename(root) : path.posix.basename(dir);
+      out.push({ dir, name: typeof j.name === 'string' ? j.name : fallback, entry });
+    } catch { /* package.json illisible : ignoré */ }
+  }
+  return out;
+}
+
+function packageLayer(pkgs: Pkg[], pkgOf: Map<string, string>, links: GLink[]): Layer {
+  const counts = new Map<string, number>();
+  for (const p of pkgOf.values()) counts.set(p, (counts.get(p) ?? 0) + 1);
+  const nodes: GNode[] = pkgs
+    .filter((p) => counts.has(p.dir))
+    .map((p) => ({
+      id: p.dir,
+      label: p.name,
+      dir: p.dir === '.' ? '.' : path.posix.dirname(p.dir),
+      kind: 'package' as const,
+      file: p.dir === '.' ? 'package.json' : `${p.dir}/package.json`,
+      count: counts.get(p.dir),
+    }));
+  const agg = new Map<string, GLink>();
+  for (const l of links) {
+    const s = pkgOf.get(l.source), t = pkgOf.get(l.target);
+    if (!s || !t || s === t) continue;
+    const key = `${s}\u0000${t}`;
+    const cur = agg.get(key);
+    if (cur) cur.w = (cur.w ?? 1) + 1;
+    else agg.set(key, { source: s, target: t, w: 1 });
+  }
+  const pl = [...agg.values()];
+  return { nodes, links: pl, cycles: findCycles(nodes.map((n) => n.id), pl) };
+}
+
 export function scan(root: string, opts: ScanOptions = {}): Graph {
   const files: string[] = [];
-  walk(root, root, opts, files);
+  const pkgDirs: string[] = [];
+  walk(root, root, opts, files, pkgDirs);
   const fileSet = new Set(files);
   const aliases = loadAliases(root);
+
+  const allPkgs = readPackages(root, pkgDirs);
+  const pkgs = allPkgs.length >= 2 ? allPkgs : []; // "monorepo" dès qu'il y a au moins 2 package.json
+  const wsPkgs = pkgs.filter((p) => p.dir !== '.').sort((a, b) => b.name.length - a.name.length);
 
   const fileExists = (rel: string): boolean => fileSet.has(rel);
 
@@ -144,6 +176,21 @@ export function scan(root: string, opts: ScanOptions = {}): Graph {
       for (const e of SRC_EXT) out.push(`${c}/index${e}`);
     }
     return out.find(fileExists) ?? null;
+  };
+
+  /** `import … from '@mon-org/lib'` quand `lib` est un package du monorepo. */
+  const resolveWorkspace = (spec: string): string | null => {
+    const pkg = wsPkgs.find((p) => spec === p.name || spec.startsWith(p.name + '/'));
+    if (!pkg) return null;
+    const sub = spec.slice(pkg.name.length).replace(/^\//, '');
+    const base = path.resolve(root, pkg.dir);
+    if (sub) return tryResolve(path.join(base, sub)) ?? tryResolve(path.join(base, 'src', sub));
+    const entries = pkg.entry.map((e) => e.replace(/^\.\//, '').replace(/^(dist|build|lib|out)\//, 'src/'));
+    for (const e of [...entries, 'src/index', 'index']) {
+      const r = tryResolve(path.join(base, e));
+      if (r) return r;
+    }
+    return null;
   };
 
   const resolveSpec = (fromFile: string, spec: string): string | null => {
@@ -178,7 +225,7 @@ export function scan(root: string, opts: ScanOptions = {}): Graph {
         if (r) return r;
       }
     }
-    return null; // paquet npm externe ou alias inconnu
+    return resolveWorkspace(spec); // packages du monorepo, sinon paquet npm externe
   };
 
   const linkSet = new Set<string>();
@@ -206,79 +253,47 @@ export function scan(root: string, opts: ScanOptions = {}): Graph {
     }
   }
 
+  // package d'appartenance : le plus proche dossier contenant un package.json
+  const pkgOf = new Map<string, string>();
+  if (pkgs.length) {
+    for (const f of files) {
+      let best: Pkg | undefined;
+      for (const p of pkgs) {
+        if ((p.dir === '.' || f.startsWith(p.dir + '/')) && (!best || p.dir.length > best.dir.length)) best = p;
+      }
+      if (best) pkgOf.set(f, best.dir);
+    }
+  }
+
   const nodes: GNode[] = files.map((f) => ({
     id: f,
     label: path.posix.basename(f),
     dir: path.posix.dirname(f),
     kind: kindOf(f),
+    isTest: TEST_RE.test(f) || TEST_DIR_RE.test(f) || undefined,
+    pkg: pkgOf.get(f),
   }));
 
+  const nest = parseNest(root, files, resolveSpec);
+  const packages = pkgs.length ? packageLayer(pkgs, pkgOf, links) : { nodes: [], links: [], cycles: [] };
+  const rulesInfo = loadRules(root);
+
   return {
-    nodes,
-    links,
-    cycles: findCycles(files, links),
+    files: { nodes, links, cycles: findCycles(files, links) },
+    nest,
+    packages,
     incidents: loadIncidents(root, fileSet),
-    stats: { files: files.length, links: links.length, unresolved },
+    violations: rulesInfo.rules.length ? checkRules(rulesInfo.rules, links) : [],
+    hasRules: rulesInfo.present && !rulesInfo.error,
+    rulesError: rulesInfo.error,
+    stats: {
+      files: files.length,
+      links: links.length,
+      unresolved,
+      nestModules: nest.nodes.length,
+      packages: packages.nodes.length,
+    },
   };
-}
-
-/** Composantes fortement connexes (Tarjan, itératif) de taille > 1 = cycles. */
-export function findCycles(ids: string[], links: GLink[]): string[][] {
-  const adj = new Map<string, string[]>();
-  for (const id of ids) adj.set(id, []);
-  for (const l of links) adj.get(l.source)?.push(l.target);
-
-  let index = 0;
-  const idx = new Map<string, number>();
-  const low = new Map<string, number>();
-  const onStack = new Set<string>();
-  const stack: string[] = [];
-  const result: string[][] = [];
-
-  for (const start of ids) {
-    if (idx.has(start)) continue;
-    const work: { v: string; i: number }[] = [{ v: start, i: 0 }];
-    idx.set(start, index);
-    low.set(start, index);
-    index++;
-    stack.push(start);
-    onStack.add(start);
-
-    while (work.length) {
-      const frame = work[work.length - 1];
-      const nbrs = adj.get(frame.v) ?? [];
-      if (frame.i < nbrs.length) {
-        const w = nbrs[frame.i++];
-        if (!idx.has(w)) {
-          idx.set(w, index);
-          low.set(w, index);
-          index++;
-          stack.push(w);
-          onStack.add(w);
-          work.push({ v: w, i: 0 });
-        } else if (onStack.has(w)) {
-          low.set(frame.v, Math.min(low.get(frame.v)!, idx.get(w)!));
-        }
-      } else {
-        if (low.get(frame.v) === idx.get(frame.v)) {
-          const comp: string[] = [];
-          let w: string;
-          do {
-            w = stack.pop()!;
-            onStack.delete(w);
-            comp.push(w);
-          } while (w !== frame.v);
-          if (comp.length > 1) result.push(comp.sort());
-        }
-        work.pop();
-        if (work.length) {
-          const parent = work[work.length - 1].v;
-          low.set(parent, Math.min(low.get(parent)!, low.get(frame.v)!));
-        }
-      }
-    }
-  }
-  return result;
 }
 
 function loadIncidents(root: string, fileSet: Set<string>): Incident[] {
@@ -295,6 +310,7 @@ function loadIncidents(root: string, fileSet: Set<string>): Incident[] {
           file: toPosix(i.file).replace(/^\.\//, ''),
           title: String(i.title),
           severity: ['low', 'medium', 'high'].includes(i.severity) ? i.severity : 'medium',
+          line: Number.isInteger(i.line) && i.line > 0 ? i.line : undefined,
         }))
         .filter((i) => fileSet.has(i.file));
     } catch {

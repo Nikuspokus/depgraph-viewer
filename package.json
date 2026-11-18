@@ -2,11 +2,11 @@
   "name": "depgraph-viewer",
   "displayName": "Dependency Graph Viewer",
   "description": "Graphe de dépendances 2D/3D d'un projet (TS/JS/Vue/Svelte/NestJS) avec cycles, incidents et simulation de panne.",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "local",
   "license": "UNLICENSED",
   "engines": {
-    "vscode": "^1.85.0"
+    "vscode": "^1.95.0"
   },
   "categories": [
     "Visualization",
@@ -38,15 +38,43 @@
           "default": [],
           "description": "Noms de dossiers supplémentaires à ignorer pendant le scan (node_modules, dist, .git… sont déjà ignorés)."
         },
-        "depgraph.includeTests": {
+        "depgraph.hideTestsByDefault": {
           "type": "boolean",
-          "default": false,
-          "description": "Inclure les fichiers de test (*.spec.*, *.test.*) dans le graphe."
+          "default": true,
+          "description": "Masquer les fichiers de test (*.spec.*, *.test.*) dans le graphe. Ils restent pris en compte pour savoir quels tests relancer."
+        },
+        "depgraph.autoRefresh": {
+          "type": "boolean",
+          "default": true,
+          "description": "Met à jour le graphe quand un fichier est enregistré, créé ou supprimé."
+        },
+        "depgraph.followActiveFile": {
+          "type": "boolean",
+          "default": true,
+          "description": "Active par défaut l'option « Suivre le fichier actif » : le graphe se centre sur le fichier ouvert dans l'éditeur."
         },
         "depgraph.autoCheckUpdates": {
           "type": "boolean",
           "default": true,
           "description": "Vérifie au démarrage (au plus toutes les 12 h) si une nouvelle version est publiée sur GitHub et propose de l'installer."
+        },
+        "depgraph.aiProvider": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "copy"
+          ],
+          "default": "auto",
+          "enumDescriptions": [
+            "Utilise les modèles de VS Code (GitHub Copilot) s'ils sont disponibles, sinon copie le prompt.",
+            "Copie toujours le prompt dans le presse-papiers (à coller dans l'app Claude), sans rien envoyer."
+          ],
+          "description": "Comment les fonctions « résumé », « suggestions » et « analyse de diff » interrogent un modèle. Aucune clé API n'est nécessaire."
+        },
+        "depgraph.aiModelFamily": {
+          "type": "string",
+          "default": "",
+          "description": "Famille de modèle à privilégier parmi ceux de VS Code (ex. claude-sonnet-4.5). Vide = Claude Sonnet si disponible, sinon le premier modèle."
         }
       }
     }
@@ -54,11 +82,12 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "build": "node esbuild.mjs",
-    "package": "node esbuild.mjs --production && vsce package --no-dependencies --skip-license"
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies --skip-license",
+    "test": "node test/run.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
-    "@types/vscode": "1.85.0",
+    "@types/vscode": "1.95.0",
     "@vscode/vsce": "^3.9.2",
     "3d-force-graph": "^1.80.2",
     "esbuild": "^0.28.2",
@@ -68,5 +97,8 @@
   "repository": {
     "type": "git",
     "url": "https://github.com/Nikuspokus/depgraph-viewer.git"
+  },
+  "bin": {
+    "depgraph-check": "dist/cli.js"
   }
 }

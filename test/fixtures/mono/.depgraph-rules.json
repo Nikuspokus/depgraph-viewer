@@ -1,0 +1,6 @@
+{
+  "rules": [
+    { "name": "Le front n'importe pas le back", "from": "packages/web/**", "notTo": "packages/api/**" },
+    { "name": "Un controller n'importe pas un repository", "from": "**/*.controller.ts", "notTo": "**/*.repository.ts" }
+  ]
+}
