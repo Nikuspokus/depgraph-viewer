@@ -1,0 +1,4 @@
+{
+  // commentaire volontaire
+  "compilerOptions": { "baseUrl": ".", "paths": { "@app/*": ["src/*"] } }
+}

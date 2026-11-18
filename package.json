@@ -1,0 +1,72 @@
+{
+  "name": "depgraph-viewer",
+  "displayName": "Dependency Graph Viewer",
+  "description": "Graphe de dépendances 2D/3D d'un projet (TS/JS/Vue/Svelte/NestJS) avec cycles, incidents et simulation de panne.",
+  "version": "0.4.0",
+  "publisher": "local",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "depgraph.show",
+        "title": "Dependency Graph: Show"
+      },
+      {
+        "command": "depgraph.checkUpdates",
+        "title": "Dependency Graph: Check for Updates"
+      }
+    ],
+    "configuration": {
+      "title": "Dependency Graph",
+      "properties": {
+        "depgraph.excludeDirs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Noms de dossiers supplémentaires à ignorer pendant le scan (node_modules, dist, .git… sont déjà ignorés)."
+        },
+        "depgraph.includeTests": {
+          "type": "boolean",
+          "default": false,
+          "description": "Inclure les fichiers de test (*.spec.*, *.test.*) dans le graphe."
+        },
+        "depgraph.autoCheckUpdates": {
+          "type": "boolean",
+          "default": true,
+          "description": "Vérifie au démarrage (au plus toutes les 12 h) si une nouvelle version est publiée sur GitHub et propose de l'installer."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "node esbuild.mjs",
+    "package": "node esbuild.mjs --production && vsce package --no-dependencies --skip-license"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/vscode": "1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "3d-force-graph": "^1.80.2",
+    "esbuild": "^0.28.2",
+    "force-graph": "^1.52.0",
+    "typescript": "^5.9.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Nikuspokus/depgraph-viewer.git"
+  }
+}
