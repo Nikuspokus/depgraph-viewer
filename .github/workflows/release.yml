@@ -1,9 +1,11 @@
 name: Release
 
-# Publie une release GitHub avec le .vsix à chaque tag de version (ex. v0.4.1).
+# À chaque push sur main : si la version du package.json n'a pas encore de release,
+# on construit le .vsix et on crée la release (le tag vX.Y.Z est créé par GitHub).
 on:
   push:
-    tags: ['v*']
+    branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -11,23 +13,31 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Lire la version
+        id: v
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+      - name: Cette version a-t-elle déjà une release ?
+        id: exists
+        run: |
+          if gh release view "v${{ steps.v.outputs.version }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.exists.outputs.exists == 'false'
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm run typecheck
-      - name: Le tag doit correspondre à la version du package.json
-        run: |
-          V="$(node -p "require('./package.json').version")"
-          if [ "v$V" != "$GITHUB_REF_NAME" ]; then
-            echo "Tag $GITHUB_REF_NAME différent de la version v$V" >&2
-            exit 1
-          fi
-      - run: npm run package
-      - name: Créer la release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" ./*.vsix --title "$GITHUB_REF_NAME" --generate-notes
+      - if: steps.exists.outputs.exists == 'false'
+        run: npm ci
+      - if: steps.exists.outputs.exists == 'false'
+        run: npm run typecheck
+      - if: steps.exists.outputs.exists == 'false'
+        run: npm run package
+      - if: steps.exists.outputs.exists == 'false'
+        run: gh release create "v${{ steps.v.outputs.version }}" ./*.vsix --target "$GITHUB_SHA" --title "v${{ steps.v.outputs.version }}" --generate-notes

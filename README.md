@@ -27,7 +27,7 @@ Barre sous la barre d'outils : cases par type de fichier, champ de chemin (`auth
 
 Au démarrage de VS Code (au plus toutes les 12 h), l'extension regarde la dernière release GitHub du dépôt. S'il y a une version plus récente, elle propose **Installer** : le `.vsix` est téléchargé, son empreinte SHA-256 est vérifiée, puis installé. La commande `Dependency Graph: Check for Updates` force la vérification, et le réglage `depgraph.autoCheckUpdates` la désactive.
 
-Publier une version : changer `version` dans `package.json`, commiter, puis `git tag vX.Y.Z && git push --tags`. GitHub Actions construit le `.vsix` et crée la release.
+Publier une version : changer `version` dans `package.json`, commiter et pousser sur `main`. GitHub Actions construit le `.vsix` et crée la release `vX.Y.Z` (si cette version n'en a pas déjà une).
 
 ## Incidents
 
