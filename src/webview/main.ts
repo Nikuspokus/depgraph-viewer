@@ -431,6 +431,10 @@ function render(keepCam = false): void {
       .nodeVal(nodeSize3D).nodeColor(nodeColor).nodeOpacity(0.95).linkOpacity(0.6)
       .linkWidth(linkWidth).linkDirectionalArrowLength(3.5).linkDirectionalArrowRelPos(1);
     if (cam) restoreCam(cam);
+    else {
+      const g3 = graph; let fit3 = false;
+      g3.onEngineStop(() => { if (graph === g3 && !fit3) { fit3 = true; g3.zoomToFit(400, 60); } });
+    }
   } else {
     const g = common((ForceGraph as any)()(container))
       .nodeRelSize(4)
@@ -746,7 +750,7 @@ for (const k of ALL_KINDS) {
   const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = true;
   cb.addEventListener('change', () => { if (cb.checked) filters.kinds.add(k); else filters.kinds.delete(k); scheduleRender(); });
   const dot = el('span', undefined, 'dot'); dot.style.background = KIND_COLOR[k];
-  lab.append(cb, dot, KIND_LABEL[k]); $('kinds').append(lab); kindBoxes.push(cb);
+  lab.append(dot, KIND_LABEL[k], cb); $('kinds').append(lab); kindBoxes.push(cb);
 }
 const fpath = $<HTMLInputElement>('fpath'), fshared = $<HTMLInputElement>('fshared'), fiso = $<HTMLInputElement>('fiso'), ftests = $<HTMLInputElement>('ftests');
 fpath.addEventListener('input', () => { filters.path = fpath.value; scheduleRender(); });
