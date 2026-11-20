@@ -2,7 +2,7 @@
   "name": "depgraph-viewer",
   "displayName": "Dependency Graph Viewer",
   "description": "Graphe de dépendances 2D/3D d'un projet (TS/JS/Vue/Svelte/NestJS) avec cycles, incidents et simulation de panne.",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "publisher": "local",
   "license": "UNLICENSED",
   "engines": {

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.6.1
+- Providers inutilisés : moins de faux positifs (`useFactory` + `inject`, classe abstraite fournie via `useClass`, noms avec `$`).
+
 ## 0.6.0
 - Vue NestJS « modules + classes » : controllers, providers, injections par constructeur, `@Inject(forwardRef)` et jetons.
 - Providers probablement inutilisés : couleur, filtre et soulignement dans l'éditeur.

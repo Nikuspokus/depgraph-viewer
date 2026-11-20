@@ -211,6 +211,7 @@ await ok('injection : constructeur (type), @Inject(forwardRef) et @Inject(jeton)
   assert.ok(has2('UsersController', 'UsersService'));
   assert.ok(has2('UsersController', 'SmtpMailer'), 'jeton MAILER -> SmtpMailer');
   assert.ok(has2('UsersService', 'UsersRepository'));
+  assert.ok(has2('UsersController', 'RedisCache'), 'classe abstraite Cache -> useClass RedisCache');
   assert.ok(has2('UsersService', 'AuthService'), 'forwardRef');
   assert.ok(has2('AuthService', 'UsersService'));
 });
@@ -231,7 +232,7 @@ await ok('orphelins : seul UnusedService est signalé', () => {
   assert.deepEqual(orphans, ['UnusedService']);
 });
 await ok('orphelins : exporté, référencé (ModuleRef), garde APP_GUARD, @Cron et jeton ne sont pas signalés', () => {
-  for (const n of ['ExportedOnlyService', 'ReferencedService', 'RolesGuard', 'CleanupService', 'SmtpMailer', 'UsersRepository']) {
+  for (const n of ['ExportedOnlyService', 'ReferencedService', 'RolesGuard', 'CleanupService', 'SmtpMailer', 'UsersRepository', 'FactoryDepService', 'RedisCache']) {
     assert.ok(!node(n).orphan, n);
   }
 });

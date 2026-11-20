@@ -19,22 +19,25 @@ interface RawModule {
 }
 
 /** Un élément du tableau `providers` : la classe fournie et/ou le jeton qui la désigne. */
-interface ProviderEntry { token: string | null; classes: string[] }
+interface ProviderEntry { token: string | null; classes: string[]; injects: string[] }
 
 function providerEntry(e: ts.Expression): ProviderEntry {
-  if (ts.isIdentifier(e)) return { token: e.text, classes: [e.text] };
+  if (ts.isIdentifier(e)) return { token: e.text, classes: [e.text], injects: [] };
   if (ts.isObjectLiteralExpression(e)) {
     let token: string | null = null;
     const classes: string[] = [];
+    const injects: string[] = [];
     for (const p of e.properties) {
       if (!ts.isPropertyAssignment(p)) continue;
       const k = p.name.getText();
       if (k === 'provide') token = ts.isIdentifier(p.initializer) || ts.isStringLiteralLike(p.initializer) ? p.initializer.text : null;
       else if (k === 'useClass' || k === 'useExisting') classes.push(...namesOf(p.initializer));
+      // useFactory: (cfg: ConfigService) => …, inject: [ConfigService] : ces classes sont bien utilisées
+      else if (k === 'inject' && ts.isArrayLiteralExpression(p.initializer)) for (const x of p.initializer.elements) injects.push(...namesOf(x));
     }
-    return { token, classes };
+    return { token, classes, injects };
   }
-  return { token: null, classes: [] };
+  return { token: null, classes: [], injects: [] };
 }
 
 /** Nom affichable d'un provider : `UsersService` ou `{ provide: TOKEN, useClass: … }`. */
@@ -221,6 +224,7 @@ export function parseNest(
       const ids = e.classes.map((n) => resolveClass(m.file, m.importSpecs, n)).filter((x): x is string => !!x);
       if (e.token) tokenToClasses.set(e.token, [...(tokenToClasses.get(e.token) ?? []), ...ids]);
       if (e.token?.startsWith('APP_')) ids.forEach((i) => frameworkUsed.add(i));
+      for (const n of e.injects) { const id = resolveClass(m.file, m.importSpecs, n); if (id) frameworkUsed.add(id); }
     }
     const moduleId = m.id;
     for (const n of [...m.providerEntries.flatMap((e) => e.classes), ...m.controllers]) {
@@ -234,8 +238,12 @@ export function parseNest(
     const specs = classesByFile.get(c.file)!.specs;
     for (const p of c.ctor) {
       let targets: string[] = [];
-      if (p.type) { const t = resolveClass(c.file, specs, p.type); if (t) targets = [t]; }
-      else if (p.token) targets = tokenToClasses.get(p.token) ?? [];
+      if (p.type) {
+        const t = resolveClass(c.file, specs, p.type);
+        if (t) targets = [t];
+        // classe abstraite / interface utilisée comme jeton : { provide: Cache, useClass: RedisCache }
+        targets.push(...(tokenToClasses.get(p.type) ?? []));
+      } else if (p.token) targets = tokenToClasses.get(p.token) ?? [];
       for (const t of targets) add(id, t, 'inject');
     }
   }
@@ -256,7 +264,7 @@ export function parseNest(
       SPECIAL_NAME.test(c.name) || c.decorators.some((d) => d !== 'Injectable') ||
       c.methodDecorators.length > 0 || c.implementsNames.length > 0;
     if (injected.has(n.id) || exported.has(n.id) || frameworkUsed.has(n.id) || special) continue;
-    const re = new RegExp(`\\b${c.name}\\b`);
+    const re = new RegExp(`(?<![\\w$])${c.name.replace(/\$/g, '\\$')}(?![\\w$])`);
     if (scanText.some((t) => t.file !== c.file && re.test(t.text))) continue;
     n.orphan = true;
   }
