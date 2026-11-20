@@ -192,6 +192,56 @@ await ok('ia : accès refusé par VS Code = message clair', async () => {
   const r = await ai.askAi(ctxOf(true), P, 'test');
   assert.equal(r.reason, 'error'); assert.match(r.message, /refusé/);
 });
+
+console.log('\nIA : ordre Copilot puis Claude (CLI)');
+const stubDir = mkdtempSync(path.join(out, 'stub-'));
+const stub = (name, body) => { const f = path.join(stubDir, name); fs.writeFileSync(f, '#!/bin/sh\n' + body); fs.chmodSync(f, 0o755); return f; };
+// faux « claude » : renvoie le dossier courant, la présence d'une clé API et les arguments reçus
+const okCli = stub('claude-ok', `cat >/dev/null; printf '{"result":"cwd=%s key=%s args=%s","is_error":false,"modelUsage":{"claude-sonnet-x":{}}}' "$PWD" "\${ANTHROPIC_API_KEY:-absente}" "$*"`);
+const failCli = stub('claude-fail', `cat >/dev/null; printf '{"result":"Not logged in","is_error":true}'; exit 1`);
+const useOrder = (order, bin) => { cfg.aiProviders = order; cfg.claudeCliPath = bin; };
+const reset2 = () => { delete cfg.aiProviders; delete cfg.claudeCliPath; cfg.aiProvider = 'auto'; };
+await ok('ordre : Copilot répond → Claude CLI n\'est pas appelé', async () => {
+  resetState(); state.models = [model('claude-sonnet', ['via copilot'])]; useOrder(['copilot', 'claude-cli', 'copy'], okCli);
+  const r = await ai.askAi(ctxOf(true), P, 'test'); reset2();
+  assert.equal(r.ok, true); assert.equal(r.text, 'via copilot');
+});
+await ok('ordre : sans modèle Copilot → Claude CLI (abonnement), dossier neutre, sans outils, sans clé API', async () => {
+  resetState(); process.env.ANTHROPIC_API_KEY = 'sk-secret'; useOrder(['copilot', 'claude-cli', 'copy'], okCli);
+  const r = await ai.askAi(ctxOf(true), P, 'test'); reset2(); delete process.env.ANTHROPIC_API_KEY;
+  assert.equal(r.ok, true);
+  assert.match(r.text, /key=absente/, 'la clé API ne doit pas être transmise');
+  assert.match(r.text, /cwd=.*depgraph-claude-/, 'dossier temporaire, pas le projet');
+  assert.match(r.text, /-p --output-format json --tools/);
+  assert.match(r.model, /Claude \(claude-sonnet-x\)/);
+});
+await ok('ordre : Copilot en échec (quota) → on passe à Claude CLI', async () => {
+  resetState(); state.models = [model('gpt', [], new Error('quota dépassé'))]; useOrder(['copilot', 'claude-cli', 'copy'], okCli);
+  const r = await ai.askAi(ctxOf(true), P, 'test'); reset2();
+  assert.equal(r.ok, true); assert.match(r.text, /cwd=/);
+});
+await ok('ordre : Claude CLI introuvable → copie du prompt', async () => {
+  resetState(); useOrder(['claude-cli', 'copy'], path.join(stubDir, 'inexistant'));
+  const r = await ai.askAi(ctxOf(true), P, 'test'); reset2();
+  assert.equal(r.reason, 'copied'); assert.equal(state.clip, 'S\n\nU');
+});
+await ok('ordre : Claude CLI non connecté → message clair + copie', async () => {
+  resetState(); useOrder(['claude-cli', 'copy'], failCli);
+  const r = await ai.askAi(ctxOf(true), P, 'test'); reset2();
+  assert.equal(r.reason, 'copied'); assert.match(r.message, /Not logged in/); assert.match(r.message, /claude/);
+});
+await ok('ordre : consentement refusé pour Claude CLI = rien n\'est envoyé', async () => {
+  resetState(); state.warn = undefined; useOrder(['claude-cli', 'copy'], okCli);
+  const r = await ai.askAi(ctxOf(false), P, 'test'); reset2();
+  assert.equal(r.reason, 'cancelled'); assert.equal(state.clip, null);
+});
+await ok('modèles : la liste affiche family et id pour le réglage aiModelFamily', async () => {
+  resetState(); state.models = [{ name: 'Claude Sonnet', family: 'claude-sonnet', id: 'x1', vendor: 'copilot', maxInputTokens: 1000 }];
+  const t = await ai.describeModels();
+  assert.match(t, /family : claude-sonnet/); assert.match(t, /id : x1/); assert.match(t, /1000 tokens/);
+  resetState(); assert.match(await ai.describeModels(), /Aucun modèle/);
+});
+
 Module._load = origLoad;
 
 console.log('NestJS : injections et providers inutilisés');

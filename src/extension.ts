@@ -6,7 +6,7 @@ import { scan } from './scanner';
 import { checkForUpdates } from './updater';
 import { ChangeMode, changedFiles, churnByFile, compareWith, defaultBase, isGitRepo, listRefs } from './git';
 import { buildReview, computeRisk, reviewMarkdown } from './review';
-import { askAi, AiResult } from './ai';
+import { askAi, AiResult, describeModels } from './ai';
 import { buildDigest, diffPrompt, directRelations, parseSuggestions, suggestPrompt, summaryPrompt } from './prompts';
 import { Graph, Layer } from './shared/types';
 
@@ -25,6 +25,13 @@ export function activate(ctx: vscode.ExtensionContext): void {
   ctx.subscriptions.push(
     diagnostics,
     vscode.commands.registerCommand('depgraph.show', () => show(ctx)),
+    vscode.commands.registerCommand('depgraph.listModels', async () => {
+      const txt = await describeModels();
+      await vscode.env.clipboard.writeText(txt);
+      const doc = await vscode.workspace.openTextDocument({ content: txt, language: 'markdown' });
+      await vscode.window.showTextDocument(doc, { preview: true });
+      vscode.window.setStatusBarMessage('Dependency Graph : liste copiée dans le presse-papiers', 4000);
+    }),
     vscode.commands.registerCommand('depgraph.checkUpdates', () => checkForUpdates(ctx, true)),
   );
   // Vérification discrète après le démarrage (au plus une fois toutes les 12 h)

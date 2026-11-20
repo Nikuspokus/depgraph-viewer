@@ -2,7 +2,7 @@
   "name": "depgraph-viewer",
   "displayName": "Dependency Graph Viewer",
   "description": "Graphe de dépendances 2D/3D d'un projet (TS/JS/Vue/Svelte/NestJS) avec cycles, incidents et simulation de panne.",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "publisher": "local",
   "license": "UNLICENSED",
   "engines": {
@@ -25,6 +25,10 @@
       {
         "command": "depgraph.checkUpdates",
         "title": "Dependency Graph: Check for Updates"
+      },
+      {
+        "command": "depgraph.listModels",
+        "title": "Dependency Graph: List AI Models"
       }
     ],
     "configuration": {
@@ -80,6 +84,27 @@
           "type": "boolean",
           "default": true,
           "description": "Souligne dans l'éditeur les providers NestJS probablement inutilisés (mis à jour à chaque analyse du graphe)."
+        },
+        "depgraph.aiProviders": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "copilot",
+              "claude-cli",
+              "copy"
+            ]
+          },
+          "default": [
+            "copilot",
+            "copy"
+          ],
+          "description": "Ordre d'essai pour les fonctions IA : « copilot » (modèles de VS Code / GitHub Copilot), « claude-cli » (ton abonnement Claude via la commande officielle `claude`, après `claude login`), « copy » (copie le prompt). Exemple : [\"copilot\", \"claude-cli\", \"copy\"]. Aucune clé API n'est utilisée."
+        },
+        "depgraph.claudeCliPath": {
+          "type": "string",
+          "default": "claude",
+          "description": "Chemin de la commande `claude` (Claude Code) si elle n'est pas dans le PATH de VS Code."
         }
       }
     }

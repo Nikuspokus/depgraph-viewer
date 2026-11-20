@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.0
+- IA : ordre de fournisseurs réglable (`depgraph.aiProviders`) : Copilot, puis Claude via la commande `claude` (abonnement, sans clé API), puis copie du prompt.
+- Commande `Dependency Graph: List AI Models` : liste les modèles exposés par VS Code (family, id, contexte).
+
 ## 0.6.1
 - Providers inutilisés : moins de faux positifs (`useFactory` + `inject`, classe abstraite fournie via `useClass`, noms avec `$`).
 

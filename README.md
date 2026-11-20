@@ -40,7 +40,11 @@ Le sélecteur **Vue** bascule entre **Fichiers**, **Modules NestJS** (décorateu
 - **Impact Git** : modifications non commitées, branche vs `main`, ou depuis un tag/commit. Fichiers modifiés en jaune, impactés en orange, et la liste des **tests à relancer** (copiable).
 - **Comparer…** le projet actuel à une branche, un tag ou un commit : nœuds/liens ajoutés en vert, supprimés en rouge (fantômes).
 - **Exporter** la vue en Mermaid (`.md`, s'affiche dans GitHub), SVG ou PNG.
-- **IA** (résumer un fichier, suggérer des simulations, analyser le risque d'un diff) : utilise les modèles de VS Code (GitHub Copilot), **sans clé API**. Sans modèle disponible, ou avec `depgraph.aiProvider = copy`, le prompt est copié dans le presse-papiers pour le coller dans Claude. Une confirmation est demandée avant le premier envoi de code.
+- **IA** (résumer un fichier, suggérer des simulations, analyser le risque d'un diff), **sans clé API**. Ordre d'essai réglable avec `depgraph.aiProviders` (défaut `["copilot","copy"]`) :
+  1. `copilot` : modèles de VS Code (GitHub Copilot) ; `Dependency Graph: List AI Models` affiche les modèles réellement exposés (family, id) pour `depgraph.aiModelFamily` ;
+  2. `claude-cli` : ton abonnement Claude via la commande officielle `claude` (Claude Code, après `claude login`), lancée sans outils dans un dossier temporaire et sans clé API. Les conditions de facturation des appels `claude -p` ont changé en 2026 : vérifie-les sur ton compte avant d'en faire un usage intensif ;
+  3. `copy` : copie le prompt pour le coller dans Claude.
+  Un fournisseur absent ou en échec (quota…) laisse la main au suivant. Une confirmation est demandée avant le premier envoi de code, pour chaque fournisseur : vérifie que la politique de ton employeur ou de ton client autorise l'envoi.
 
 ### Providers inutilisés
 
