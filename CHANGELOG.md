@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.7.1
+- IA : la liste de modèles Copilot est filtrée (modèles utilitaires, « Auto », contexte < 30 000 tokens, doublons `copilotcli`) ; par défaut Claude Sonnet 5.5 si disponible.
+
 ## 0.7.0
 - IA : ordre de fournisseurs réglable (`depgraph.aiProviders`) : Copilot, puis Claude via la commande `claude` (abonnement, sans clé API), puis copie du prompt.
 - Commande `Dependency Graph: List AI Models` : liste les modèles exposés par VS Code (family, id, contexte).

@@ -235,6 +235,18 @@ await ok('ordre : consentement refusé pour Claude CLI = rien n\'est envoyé', a
   const r = await ai.askAi(ctxOf(false), P, 'test'); reset2();
   assert.equal(r.reason, 'cancelled'); assert.equal(state.clip, null);
 });
+await ok('modèles : on écarte utilitaires, petit contexte, Auto et doublons copilotcli', async () => {
+  resetState();
+  state.models = [
+    { name: 'Claude Sonnet 5.5', family: 'claude-sonnet-5.5', id: 'claude-sonnet-5.5', vendor: 'copilotcli', maxInputTokens: 936000, sendRequest: async () => ({ text: (async function* () { yield 'cli'; })() }) },
+    { name: 'GPT-4o mini', family: 'gpt-4o-mini', id: 'gpt-4o-mini', vendor: 'copilot', maxInputTokens: 12078 },
+    { name: 'Auto', family: 'claude-haiku-5.5', id: 'auto', vendor: 'copilot', maxInputTokens: 871793 },
+    { name: 'GPT-5.3-Codex', family: 'copilot-utility', id: 'copilot-utility', vendor: 'copilot', maxInputTokens: 271790 },
+    { name: 'Claude Sonnet 5.5', family: 'claude-sonnet-5.5', id: 'claude-sonnet-5.5', vendor: 'copilot', maxInputTokens: 871793, sendRequest: async () => ({ text: (async function* () { yield 'copilot'; })() }) },
+  ];
+  const r = await ai.askAi(ctxOf(true), P, 'test');
+  assert.equal(r.ok, true); assert.equal(r.text, 'copilot');
+});
 await ok('modèles : la liste affiche family et id pour le réglage aiModelFamily', async () => {
   resetState(); state.models = [{ name: 'Claude Sonnet', family: 'claude-sonnet', id: 'x1', vendor: 'copilot', maxInputTokens: 1000 }];
   const t = await ai.describeModels();

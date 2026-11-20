@@ -56,9 +56,21 @@ async function consent(ctx: vscode.ExtensionContext, key: string, message: strin
   return true;
 }
 
+/**
+ * Écarte les entrées inutilisables de la liste renvoyée par VS Code : modèles internes (`copilot-utility…`,
+ * dictée), contexte trop petit pour un graphe (< 30 000 tokens) et doublons du fournisseur `copilotcli`
+ * quand le fournisseur `copilot` existe.
+ */
+export function usableModels(all: vscode.LanguageModelChat[]): vscode.LanguageModelChat[] {
+  const keep = all.filter((m) => !/^copilot-/.test(m.family) && !/^copilot-/.test(m.id) && m.id !== 'auto' && (m.maxInputTokens ?? Infinity) >= 30_000);
+  const main = keep.filter((m) => m.vendor === 'copilot');
+  return main.length ? main : keep;
+}
+
 async function viaCopilot(ctx: vscode.ExtensionContext, cfg: vscode.WorkspaceConfiguration, text: string, what: string): Promise<AiResult | null> {
   let models: vscode.LanguageModelChat[] = [];
   try { models = await vscode.lm.selectChatModels({}); } catch { /* API indisponible */ }
+  models = usableModels(models);
   if (models.length === 0) return null;
 
   // Le contenu part vers le fournisseur du modèle : on demande une fois, explicitement.
