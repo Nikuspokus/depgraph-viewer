@@ -2,7 +2,7 @@
   "name": "depgraph-viewer",
   "displayName": "Dependency Graph Viewer",
   "description": "Graphe de dépendances 2D/3D d'un projet (TS/JS/Vue/Svelte/NestJS) avec cycles, incidents et simulation de panne.",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "publisher": "local",
   "license": "UNLICENSED",
   "engines": {
@@ -75,6 +75,11 @@
           "type": "string",
           "default": "",
           "description": "Famille de modèle à privilégier parmi ceux de VS Code (ex. claude-sonnet-4.5). Vide = Claude Sonnet si disponible, sinon le premier modèle."
+        },
+        "depgraph.diagnostics": {
+          "type": "boolean",
+          "default": true,
+          "description": "Souligne dans l'éditeur les providers NestJS probablement inutilisés (mis à jour à chaque analyse du graphe)."
         }
       }
     }

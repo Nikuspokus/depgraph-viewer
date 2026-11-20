@@ -95,6 +95,7 @@ const MERMAID_STYLES: Record<string, string> = {
   violation: 'fill:#9b5de5,stroke:#333,color:#fff',
   incident: 'fill:#f14c4c,stroke:#333,color:#fff',
   cycle: 'fill:#ff4fd8,stroke:#333,color:#111',
+  orphan: 'fill:#a07c4a,stroke:#333,color:#fff',
   active: 'fill:#00e5ff,stroke:#333,color:#111',
 };
 const LINK_COLOR: Record<string, string> = { added: '#3fb950', removed: '#f85149', violation: '#9b5de5', impact: '#ffa733' };

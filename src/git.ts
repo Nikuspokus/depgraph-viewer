@@ -3,7 +3,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { scan, ScanOptions } from './scanner';
-import { ChangeSet, CompareResult, Layer, LayerDiff } from './shared/types';
+import { ChangeSet, CompareResult, Graph, Layer, LayerDiff } from './shared/types';
 
 function git(cwd: string, args: string[]): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -66,6 +66,25 @@ export async function changedFiles(root: string, mode: ChangeMode): Promise<Chan
   return { label, files: [...new Set([...lines(tracked), ...lines(untracked)])] };
 }
 
+/** Point de comparaison d'un mode : HEAD, merge-base avec la branche principale, ou la référence choisie. */
+export async function baseRefOf(root: string, mode: ChangeMode): Promise<string> {
+  if (mode.kind === 'working') return (await refExists(root, 'HEAD')) ? 'HEAD' : '';
+  if (mode.kind === 'ref') return safeRef(mode.ref);
+  const base = await defaultBase(root);
+  if (!base) throw new Error("Aucune branche main/master trouvée pour servir de base à la comparaison.");
+  return (await git(root, ['merge-base', base, 'HEAD'])).trim();
+}
+
+/** Nombre de commits qui ont touché chaque fichier depuis `days` jours (le « churn » : à quelle fréquence il change). */
+export async function churnByFile(root: string, days = 90): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  try {
+    const txt = await git(root, ['log', `--since=${days}.days`, '--name-only', '--pretty=format:', '--no-renames', '--relative', '--']);
+    for (const f of lines(txt)) out.set(f, (out.get(f) ?? 0) + 1);
+  } catch { /* pas d'historique exploitable */ }
+  return out;
+}
+
 /** Extrait le contenu d'une référence dans un dossier, sans toucher au dossier de travail. */
 function archiveTo(root: string, treeish: string, dir: string): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -101,8 +120,8 @@ function diffLayer(cur: Layer, old: Layer): LayerDiff {
   };
 }
 
-/** Compare le projet actuel à celui d'une branche, d'un tag ou d'un commit. */
-export async function compareWith(root: string, ref: string, opts: ScanOptions): Promise<CompareResult> {
+/** Scanne le projet tel qu'il était à `ref`, sans toucher au dossier de travail. */
+export async function scanRef(root: string, ref: string, opts: ScanOptions): Promise<Graph> {
   safeRef(ref);
   if (!(await refExists(root, ref))) throw new Error(`Référence introuvable : « ${ref} »`);
   const prefix = (await git(root, ['rev-parse', '--show-prefix'])).trim().replace(/\/$/, '');
@@ -110,15 +129,21 @@ export async function compareWith(root: string, ref: string, opts: ScanOptions):
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'depgraph-cmp-'));
   try {
     await archiveTo(root, treeish, dir);
-    const oldG = scan(dir, opts);
-    const curG = scan(root, opts);
-    return {
-      ref,
-      files: diffLayer(curG.files, oldG.files),
-      nest: diffLayer(curG.nest, oldG.nest),
-      packages: diffLayer(curG.packages, oldG.packages),
-    };
+    return scan(dir, opts);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/** Compare le projet actuel à celui d'une branche, d'un tag ou d'un commit. */
+export async function compareWith(root: string, ref: string, opts: ScanOptions): Promise<CompareResult> {
+  const oldG = await scanRef(root, ref, opts);
+  const curG = scan(root, opts);
+  return {
+    ref,
+    files: diffLayer(curG.files, oldG.files),
+    nest: diffLayer(curG.nest, oldG.nest),
+    nestClasses: diffLayer(curG.nestClasses, oldG.nestClasses),
+    packages: diffLayer(curG.packages, oldG.packages),
+  };
 }

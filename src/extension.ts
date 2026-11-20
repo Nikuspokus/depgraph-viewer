@@ -4,7 +4,8 @@ import * as path from 'path';
 import { randomBytes } from 'crypto';
 import { scan } from './scanner';
 import { checkForUpdates } from './updater';
-import { ChangeMode, changedFiles, compareWith, defaultBase, isGitRepo, listRefs } from './git';
+import { ChangeMode, changedFiles, churnByFile, compareWith, defaultBase, isGitRepo, listRefs } from './git';
+import { buildReview, computeRisk, reviewMarkdown } from './review';
 import { askAi, AiResult } from './ai';
 import { buildDigest, diffPrompt, directRelations, parseSuggestions, suggestPrompt, summaryPrompt } from './prompts';
 import { Graph, Layer } from './shared/types';
@@ -14,12 +15,15 @@ let panelDisposables: vscode.Disposable[] = [];
 let currentRoot: string | undefined;
 let lastGraph: Graph | undefined;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+let diagnostics: vscode.DiagnosticCollection | undefined;
 
 const SRC_RE = /\.(ts|tsx|js|jsx|mjs|cjs|vue|svelte)$/;
 const RELEVANT_FILES = new Set(['package.json', 'tsconfig.json', 'jsconfig.json', 'incidents.json', '.depgraph-rules.json', 'rules.json']);
 
 export function activate(ctx: vscode.ExtensionContext): void {
+  diagnostics = vscode.languages.createDiagnosticCollection('depgraph');
   ctx.subscriptions.push(
+    diagnostics,
     vscode.commands.registerCommand('depgraph.show', () => show(ctx)),
     vscode.commands.registerCommand('depgraph.checkUpdates', () => checkForUpdates(ctx, true)),
   );
@@ -125,6 +129,7 @@ async function sendGraph(refresh: boolean): Promise<void> {
       try {
         const graph = scan(root, { excludeDirs: cfg.get<string[]>('excludeDirs', []) });
         lastGraph = graph;
+        publishDiagnostics(graph, root, cfg.get<boolean>('diagnostics', true));
         post({
           type: 'graph',
           graph,
@@ -145,6 +150,26 @@ async function sendGraph(refresh: boolean): Promise<void> {
   );
 }
 
+/** Soulignement « provider probablement inutilisé » dans l'éditeur (Problems + ligne soulignée). */
+function publishDiagnostics(g: Graph, root: string, enabled: boolean): void {
+  diagnostics?.clear();
+  if (!enabled || !diagnostics) return;
+  const byFile = new Map<string, vscode.Diagnostic[]>();
+  for (const n of g.nestClasses.nodes) {
+    if (!n.orphan || !n.file) continue;
+    const l = Math.max(0, (n.line ?? 1) - 1);
+    const d = new vscode.Diagnostic(
+      new vscode.Range(l, 0, l, 200),
+      `${n.label} est déclaré comme provider mais n'est injecté nulle part (ni exporté, ni référencé ailleurs). Probablement du code mort : vérifie avant de supprimer.`,
+      vscode.DiagnosticSeverity.Information,
+    );
+    d.source = 'Dependency Graph';
+    d.code = 'provider-inutilise';
+    byFile.set(n.file, [...(byFile.get(n.file) ?? []), d]);
+  }
+  for (const [file, list] of byFile) diagnostics.set(vscode.Uri.file(path.join(root, file)), list);
+}
+
 // ---------- messages venant du webview ----------
 interface Msg { type: string; [k: string]: any }
 
@@ -161,6 +186,8 @@ async function onMessage(ctx: vscode.ExtensionContext, msg: Msg): Promise<void> 
         break;
       case 'requestDiff': await requestDiff(); break;
       case 'requestCompare': await requestCompare(); break;
+      case 'requestReview': await requestReview(); break;
+      case 'requestRisk': await requestRisk(); break;
       case 'summarize': await summarize(ctx, msg.id, msg.scope); break;
       case 'suggest': await suggest(ctx); break;
       case 'analyzeDiff': await analyzeDiff(ctx, msg); break;
@@ -207,12 +234,12 @@ async function pickRef(placeHolder: string): Promise<string | undefined> {
   return vscode.window.showInputBox({ prompt: 'Branche, tag ou commit (ex. main, v1.2.0, a1b2c3d, HEAD~5)' });
 }
 
-async function requestDiff(): Promise<void> {
+async function pickMode(placeHolder: string): Promise<ChangeMode | undefined> {
   const root = currentRoot;
-  if (!root) return;
+  if (!root) return undefined;
   if (!(await isGitRepo(root))) {
     vscode.window.showWarningMessage("Dependency Graph : ce dossier n'est pas un dépôt Git.");
-    return;
+    return undefined;
   }
   const base = await defaultBase(root);
   type Item = vscode.QuickPickItem & { mode?: ChangeMode; pick?: boolean };
@@ -221,16 +248,40 @@ async function requestDiff(): Promise<void> {
     ...(base ? [{ label: `$(git-branch) Branche courante vs ${base}`, description: 'comme dans une pull request', mode: { kind: 'branch' } } as Item] : []),
     { label: '$(tag) Depuis une branche, un tag ou un commit…', pick: true },
   ];
-  const choice = await vscode.window.showQuickPick(items, { placeHolder: "Quelles modifications analyser ?" });
-  if (!choice) return;
-  let mode = choice.mode;
+  const choice = await vscode.window.showQuickPick(items, { placeHolder });
+  if (!choice) return undefined;
   if (choice.pick) {
     const ref = await pickRef('Modifications depuis…');
-    if (!ref) return;
-    mode = { kind: 'ref', ref };
+    return ref ? { kind: 'ref', ref } : undefined;
   }
-  const set = await changedFiles(root, mode as ChangeMode);
-  post({ type: 'changes', set });
+  return choice.mode;
+}
+
+async function requestDiff(): Promise<void> {
+  const mode = await pickMode('Quelles modifications analyser ?');
+  if (!mode || !currentRoot) return;
+  post({ type: 'changes', set: await changedFiles(currentRoot, mode) });
+}
+
+/** Revue complète avant PR : impact, tests, projets, nouveaux problèmes par rapport à la base, points chauds. */
+async function requestReview(): Promise<void> {
+  const mode = await pickMode('Revue avant PR : quelles modifications ?');
+  if (!mode || !currentRoot) return;
+  const root = currentRoot;
+  const cfg = vscode.workspace.getConfiguration('depgraph');
+  const review = await vscode.window.withProgress(
+    { location: vscode.ProgressLocation.Notification, title: 'Dependency Graph : revue d\'impact…' },
+    () => buildReview(root, mode, { excludeDirs: cfg.get<string[]>('excludeDirs', []) }),
+  );
+  post({ type: 'review', review, markdown: reviewMarkdown(review), set: { label: review.label, files: review.changed } });
+}
+
+/** Points chauds : impact × fréquence de modification × cycle × absence de test. */
+async function requestRisk(): Promise<void> {
+  if (!lastGraph || !currentRoot) return;
+  const churn = await churnByFile(currentRoot);
+  const risk = computeRisk(lastGraph.files, churn);
+  post({ type: 'risk', scores: Object.fromEntries(risk), git: churn.size > 0 });
 }
 
 async function requestCompare(): Promise<void> {
@@ -257,7 +308,7 @@ function postAi(kind: string, extra: Record<string, unknown>, r: AiResult): void
 }
 
 function layerOf(g: Graph, scope: string): Layer {
-  return scope === 'nest' ? g.nest : scope === 'packages' ? g.packages : g.files;
+  return scope === 'nest' ? g.nest : scope === 'nestc' ? g.nestClasses : scope === 'packages' ? g.packages : g.files;
 }
 
 async function summarize(ctx: vscode.ExtensionContext, id: string, scope: string): Promise<void> {
@@ -359,6 +410,7 @@ function html(webview: vscode.Webview, extUri: vscode.Uri): string {
     <label class="chk" title="Masque les fichiers importés par au moins N autres (utilitaires omniprésents). 0 = désactivé.">Masquer importés par ≥ <input id="fshared" type="number" min="0" value="0" /></label>
     <label class="chk"><input id="fiso" type="checkbox" /> Masquer isolés</label>
     <label class="chk"><input id="ftests" type="checkbox" checked /> Masquer tests</label>
+    <label class="chk" title="Vue NestJS : providers déclarés mais jamais injectés (probablement du code mort)"><input id="forph" type="checkbox" /> Seulement providers inutilisés</label>
     <label class="chk" title="Regroupe les fichiers par dossier à cette profondeur. Clic droit sur un dossier : le déplier.">Regrouper
       <select id="fgroup"><option value="0">non</option><option value="1">niveau 1</option><option value="2">niveau 2</option><option value="3">niveau 3</option><option value="4">niveau 4</option></select>
     </label>
@@ -369,12 +421,15 @@ function html(webview: vscode.Webview, extUri: vscode.Uri): string {
       <select id="scope">
         <option value="files">Fichiers</option>
         <option value="nest">Modules NestJS</option>
+        <option value="nestc">NestJS : modules + classes</option>
         <option value="packages">Packages (monorepo)</option>
       </select>
     </label>
+    <button id="breview" title="Revue avant PR : impact, tests, projets, nouveaux cycles/violations vs la base, points chauds. Résumé copiable.">Revue PR</button>
     <button id="bdiff" title="Quels fichiers sont impactés par mes modifications Git, et quels tests relancer ?">Impact Git</button>
     <button id="bcmp" title="Compare le projet actuel à une branche, un tag ou un commit">Comparer…</button>
     <button id="bclear" style="display:none">Quitter</button>
+    <button id="brisk" title="Colore les fichiers selon leur risque : dépendants, fréquence de modification, cycle, absence de test">Points chauds</button>
     <button id="bsug" title="Propose des scénarios de panne à étudier (modèle de VS Code / Copilot)">Suggestions IA</button>
     <select id="export" title="Exporter la vue">
       <option value="">Exporter…</option>

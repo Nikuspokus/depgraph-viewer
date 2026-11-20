@@ -274,13 +274,15 @@ export function scan(root: string, opts: ScanOptions = {}): Graph {
     pkg: pkgOf.get(f),
   }));
 
-  const nest = parseNest(root, files, resolveSpec);
+  const nestRes = parseNest(root, files, resolveSpec);
+  const nest = nestRes.modules;
   const packages = pkgs.length ? packageLayer(pkgs, pkgOf, links) : { nodes: [], links: [], cycles: [] };
   const rulesInfo = loadRules(root);
 
   return {
     files: { nodes, links, cycles: findCycles(files, links) },
     nest,
+    nestClasses: nestRes.classes,
     packages,
     incidents: loadIncidents(root, fileSet),
     violations: rulesInfo.rules.length ? checkRules(rulesInfo.rules, links) : [],
@@ -291,6 +293,7 @@ export function scan(root: string, opts: ScanOptions = {}): Graph {
       links: links.length,
       unresolved,
       nestModules: nest.nodes.length,
+      nestClasses: nestRes.classes.nodes.length,
       packages: packages.nodes.length,
     },
   };

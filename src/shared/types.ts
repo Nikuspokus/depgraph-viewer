@@ -21,6 +21,8 @@ export interface GNode {
   pkg?: string; // dossier du package auquel appartient le fichier (monorepo)
   count?: number; // nombre de fichiers (vue packages) ou de membres (dossier regroupé)
   nest?: NestInfo;
+  role?: 'module' | 'controller' | 'provider'; // vue « modules + classes »
+  orphan?: boolean; // provider probablement jamais utilisé
   [k: string]: any; // la librairie de graphe ajoute x, y, fx, fy…
 }
 
@@ -28,6 +30,7 @@ export interface GLink {
   source: string; // celui qui dépend…
   target: string; // …de celui-ci
   w?: number; // poids (nombre de liens agrégés)
+  kind?: 'import' | 'declare' | 'inject'; // vue Nest : import de module, déclaration dans un module, injection par constructeur
 }
 
 export interface Layer {
@@ -52,12 +55,13 @@ export interface Violation {
 export interface Graph {
   files: Layer; // imports de fichiers
   nest: Layer; // modules NestJS (@Module)
+  nestClasses: Layer; // modules + controllers + providers, avec les injections par constructeur
   packages: Layer; // packages d'un monorepo
   incidents: Incident[];
   violations: Violation[];
   hasRules: boolean;
   rulesError?: string;
-  stats: { files: number; links: number; unresolved: number; nestModules: number; packages: number };
+  stats: { files: number; links: number; unresolved: number; nestModules: number; nestClasses: number; packages: number };
 }
 
 export interface LayerDiff {
@@ -71,6 +75,7 @@ export interface CompareResult {
   ref: string;
   files: LayerDiff;
   nest: LayerDiff;
+  nestClasses: LayerDiff;
   packages: LayerDiff;
 }
 

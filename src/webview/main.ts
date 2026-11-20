@@ -3,6 +3,7 @@ import ForceGraph from 'force-graph';
 import ForceGraph3D from '3d-force-graph';
 import { Graph, GLink, GNode, Incident, Layer, LayerDiff, CompareResult, ChangeSet } from '../shared/types';
 import { impactOf, reverseAdj } from '../shared/graph';
+import { projectsOf } from '../shared/projects';
 import { BOX_H, boxLabel, computeLayout } from './layout';
 import { ExLink, ExNode, MLink, MNode, toMermaid, toSvg } from './exporters';
 
@@ -10,7 +11,10 @@ declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
 const vscode = acquireVsCodeApi();
 
 type Mode = 'tree' | '2d' | '3d';
-type Scope = 'files' | 'nest' | 'packages';
+type Scope = 'files' | 'nest' | 'nestc' | 'packages';
+interface RiskInfo { score: number; impact: number; churn: number; inCycle: boolean; untested: boolean }
+interface Delta { newCycles: string[][]; fixedCycles: number; newViolations: { rule: string; source: string; target: string }[]; fixedViolations: number; newOrphans: string[] }
+interface Review { label: string; base: string; changed: string[]; impacted: string[]; tests: string[]; projects: { changed: string[]; impacted: string[] }; delta: Delta; risky: (RiskInfo & { file: string })[] }
 interface Suggestion { file: string; title: string; why: string; check: string }
 interface AiBox { loading?: boolean; text?: string; error?: string; copied?: boolean; model?: string }
 
@@ -28,6 +32,7 @@ const COL_REMOVED = '#f85149';
 const COL_VIOLATION = '#9b5de5';
 const COL_ACTIVE = '#00e5ff';
 const COL_MATCH = '#ffe066';
+const COL_ORPHAN = '#a07c4a';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 const container = $('canvas'); // la librairie vide son conteneur : il ne doit contenir que le graphe
@@ -46,13 +51,17 @@ let activeFile: string | null = null;
 let gitAvailable = false;
 let changes: ChangeSet | null = null;
 let compare: CompareResult | null = null;
+let review: Review | null = null;
+let reviewMd = '';
+let risk: Record<string, RiskInfo> | null = null;
+let riskD = new Map<string, RiskInfo>();
 let groupDepth = 0;
 const expanded = new Set<string>(); // dossiers dépliés manuellement
 let matches = new Set<string>();
 const ai = { summaries: new Map<string, AiBox>(), suggest: null as null | (AiBox & { items?: Suggestion[] | null }), diff: null as null | AiBox };
 
 const ALL_KINDS = ['module', 'controller', 'service', 'vue', 'svelte', 'other'];
-const filters = { kinds: new Set(ALL_KINDS), path: '', maxShared: 0, hideIsolated: false, hideTests: true };
+const filters = { kinds: new Set(ALL_KINDS), path: '', maxShared: 0, hideIsolated: false, hideTests: true, onlyOrphans: false };
 
 // Vue courante (recalculée à chaque rendu)
 interface View {
@@ -77,8 +86,8 @@ let testsToRerun: string[] = [];
 
 const idOf = (end: any): string => (typeof end === 'object' ? end.id : end);
 const lk = (s: string, t: string): string => s + '\u0000' + t;
-const layerOf = (g: Graph, s: Scope): Layer => (s === 'nest' ? g.nest : s === 'packages' ? g.packages : g.files);
-const diffOf = (c: CompareResult, s: Scope): LayerDiff => (s === 'nest' ? c.nest : s === 'packages' ? c.packages : c.files);
+const layerOf = (g: Graph, s: Scope): Layer => (s === 'nest' ? g.nest : s === 'nestc' ? g.nestClasses : s === 'packages' ? g.packages : g.files);
+const diffOf = (c: CompareResult, s: Scope): LayerDiff => (s === 'nest' ? c.nest : s === 'nestc' ? c.nestClasses : s === 'packages' ? c.packages : c.files);
 const fileOf = (n: GNode): string => n.file ?? n.id;
 
 // ---------- calcul de la vue ----------
@@ -92,7 +101,7 @@ function groupKey(n: GNode): string | null {
 function computeView(): View | null {
   if (!data) return null;
   const full = layerOf(data, scope);
-  const rev = reverseAdj(full.nodes.map((n) => n.id), full.links);
+  const rev = reverseAdj(full.nodes.map((n) => n.id), full.links.filter((l) => l.kind !== 'declare')); // une déclaration de module n'est pas une dépendance d'exécution
   const dif = compare ? diffOf(compare, scope) : null;
 
   let nodes: GNode[] = [...full.nodes];
@@ -153,6 +162,7 @@ function computeView(): View | null {
     if (inc.length && !inc.some((t) => id.includes(t))) return false;
     if (exc.some((t) => id.includes(t))) return false;
     if (filters.maxShared > 0 && (inDeg0.get(n.id) ?? 0) >= filters.maxShared) return false;
+    if (filters.onlyOrphans && !n.orphan) return false;
     return true;
   });
   let ids = new Set(nodes.map((n) => n.id));
@@ -168,7 +178,7 @@ function computeView(): View | null {
   const dependencies = new Map<string, string[]>();
   for (const n of nodes) { inDegree.set(n.id, 0); dependencies.set(n.id, []); }
   for (const l of links) {
-    if ((l as any).removed) continue;
+    if ((l as any).removed || l.kind === 'declare') continue;
     inDegree.set(l.target, (inDegree.get(l.target) ?? 0) + 1);
     dependencies.get(l.source)?.push(l.target);
   }
@@ -215,6 +225,8 @@ function computeOverlays(v: View): void {
       violLinks.add(lk(disp(x.source), disp(x.target)));
     }
   }
+  riskD = new Map();
+  if (risk) for (const [id, r] of Object.entries(risk)) { const k = disp(id); const p = riskD.get(k); if (!p || r.score > p.score) riskD.set(k, r); }
   incidentByNode = new Map();
   if (data && scope === 'files') {
     for (const i of data.incidents) { const k = disp(i.file); incidentByNode.set(k, [...(incidentByNode.get(k) ?? []), i]); }
@@ -232,13 +244,24 @@ function computeFocusImpact(): void {
 // ---------- styles ----------
 const isDim = (id: string): boolean => !!focus && id !== focus && !fImpact.has(id);
 
+/** Jaune (risque faible) → rouge (risque élevé), en hexadécimal pour pouvoir ajouter de la transparence. */
+function heat(score: number): string {
+  const t = Math.max(0, Math.min(100, score)) / 100;
+  const g = Math.round(214 - 150 * t), b = Math.round(60 - 30 * t);
+  const h = (x: number) => x.toString(16).padStart(2, '0');
+  return '#' + h(240) + h(g) + h(b);
+}
+
 function baseColor(n: GNode): string {
   if (focus) return (KIND_COLOR[n.kind] ?? KIND_COLOR.other);
+  const rk = riskD.get(n.id);
+  if (rk) return heat(rk.score);
   if (n.ghost || removedD.has(n.id)) return COL_REMOVED;
   if (addedD.has(n.id)) return COL_ADDED;
   if (changedD.has(n.id)) return COL_CHANGED;
   if (cImpactD.has(n.id)) return COL_IMPACT;
   if (violNodes.has(n.id)) return COL_VIOLATION;
+  if (n.orphan) return COL_ORPHAN;
   if (incidentByNode.has(n.id)) return COL_INCIDENT;
   if (view?.cyclic.has(n.id)) return COL_CYCLE;
   return KIND_COLOR[n.kind] ?? KIND_COLOR.other;
@@ -264,6 +287,7 @@ function linkColor(l: any): string {
   const s = idOf(l.source), t = idOf(l.target), k = lk(s, t);
   if (focus && (s === focus || t === focus || (fImpact.has(s) && (fImpact.has(t) || t === focus)))) return COL_IMPACT;
   if (focus) return 'rgba(150,150,150,0.12)';
+  if (l.kind === 'declare') return 'rgba(150,150,150,0.2)';
   if (removedLinks.has(k) || l.removed) return COL_REMOVED;
   if (addedLinks.has(k)) return COL_ADDED;
   if (violLinks.has(k)) return COL_VIOLATION;
@@ -368,7 +392,10 @@ function updateFocus(): void {
 function tooltip(n: GNode): string {
   const inc = incidentByNode.get(n.id)?.map((i) => `⚠ ${i.title}`).join('\n') ?? '';
   const extra = n.nest ? `\nproviders: ${n.nest.providers.length}, controllers: ${n.nest.controllers.length}` : '';
-  return `${n.id}\n${view?.inDegree.get(n.id) ?? 0} dépendant(s)${extra}${inc ? '\n' + inc : ''}`;
+  const rk = riskD.get(n.id);
+  const rtxt = rk ? `\nrisque ${rk.score}/100 : ${rk.impact} dépendant(s), ${rk.churn} commit(s)/90 j${rk.inCycle ? ', dans un cycle' : ''}${rk.untested ? ', aucun test ne l\'atteint' : ''}` : '';
+  const orph = n.orphan ? '\nprovider probablement inutilisé' : '';
+  return `${n.id}\n${view?.inDegree.get(n.id) ?? 0} dépendant(s)${extra}${rtxt}${orph}${inc ? '\n' + inc : ''}`;
 }
 
 function destroyGraph(): void {
@@ -404,11 +431,12 @@ function render(keepCam = false): void {
   hovered = null; focus = selected; computeFocusImpact();
   $('hoverinfo').textContent = '';
   $('fgroup').toggleAttribute('disabled', scope !== 'files');
-  $('bclear').style.display = changes || compare ? '' : 'none';
+  $('bclear').style.display = changes || compare || review || risk ? '' : 'none';
+  $('brisk').classList.toggle('on', !!risk);
 
   const total = layerOf(data, scope).nodes.length;
   const empty = $('empty');
-  empty.textContent = scope === 'nest' && !total ? 'Aucun module NestJS (@Module) trouvé.'
+  empty.textContent = (scope === 'nest' || scope === 'nestc') && !total ? 'Aucun module NestJS (@Module) trouvé.'
     : scope === 'packages' && !total ? 'Pas de monorepo détecté (il faut au moins 2 package.json).'
     : total ? 'Aucun nœud ne correspond aux filtres.' : 'Aucun fichier source trouvé dans ce dossier.';
   empty.style.display = view.nodes.length ? 'none' : 'flex';
@@ -505,7 +533,7 @@ function nodeForFile(file: string): string | null {
   const full = layerOf(data, scope);
   let id: string | undefined;
   if (scope === 'files') id = full.nodes.find((n) => n.id === file)?.id;
-  else if (scope === 'nest') id = full.nodes.find((n) => fileOf(n) === file)?.id;
+  else if (scope === 'nest' || scope === 'nestc') id = full.nodes.find((n) => fileOf(n) === file)?.id;
   else id = full.nodes.filter((n) => n.id === '.' || file === n.id || file.startsWith(n.id + '/')).sort((a, b) => b.id.length - a.id.length)[0]?.id;
   if (!id) return null;
   const d = view.disp(id);
@@ -520,7 +548,9 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, text?: string, cls?: 
   return e;
 }
 function nodeLink(id: string, label?: string): HTMLElement {
-  const a = el('span', label ?? id, 'link');
+  const nn = view?.nodes.find((x) => x.id === id);
+  const shown = label ?? (nn && (scope === 'nest' || scope === 'nestc') ? nn.label : id);
+  const a = el('span', shown, 'link');
   a.title = 'Clic : sélectionner · Ctrl/Cmd+clic : ouvrir';
   a.addEventListener('click', (e) => {
     const n = view?.nodes.find((x) => x.id === id) ?? data?.files.nodes.find((x) => x.id === id);
@@ -562,6 +592,11 @@ function renderOverlays(): void {
     const nChanged = changedD.size, nImp = cImpactD.size;
     side.append(el('div', `${changes.files.length} fichier(s) modifié(s) · ${nChanged} nœud(s) touché(s) · ${nImp} impacté(s) indirectement. Jaune = modifié, orange = impacté.`, 'path'));
     list('Tests à relancer', testsToRerun, (id) => openLink(id));
+    const pj = projectsOf(data.packages, changes.files);
+    if (pj.changed.length) {
+      list('Projets touchés', pj.changed, (id) => el('span', id));
+      if (pj.impacted.length) list('Projets dépendants à retester', pj.impacted, (id) => el('span', id));
+    }
     const row = el('div'); row.style.margin = '6px 0'; row.style.display = 'flex'; row.style.gap = '6px';
     row.append(
       btn('Copier la liste', () => vscode.postMessage({ type: 'copy', text: testsToRerun.join('\n') }), 'Une ligne par fichier de test'),
@@ -572,7 +607,9 @@ function renderOverlays(): void {
     );
     side.append(row);
     const b = aiBox(ai.diff); if (b) side.append(b);
+    if (review) renderReview(review);
   }
+  if (risk) renderRisk();
   if (compare) {
     const d = diffOf(compare, scope);
     side.append(el('h3', `Comparaison avec ${compare.ref}`));
@@ -591,6 +628,44 @@ function renderOverlays(): void {
       side.append(ul);
     }
   }
+}
+
+
+function renderReview(r: Review): void {
+  const d = r.delta;
+  side.append(el('h3', `Revue avant PR (base : ${r.base.slice(0, 12)})`));
+  const nothing = !d.newCycles.length && !d.newViolations.length && !d.newOrphans.length;
+  side.append(el('div', nothing ? '✔ Aucun nouveau cycle, violation ou provider inutilisé.' : 'Nouveaux problèmes introduits par ces modifications :', nothing ? 'path' : 'box err'));
+  if (d.newCycles.length) {
+    side.append(el('h3', `Nouveaux cycles (${d.newCycles.length})`));
+    d.newCycles.forEach((c) => { const ul = el('ul'); c.forEach((f) => { const li = el('li'); li.append(nodeLink(f)); ul.append(li); }); side.append(ul); });
+  }
+  if (d.newViolations.length) {
+    side.append(el('h3', `Nouvelles violations (${d.newViolations.length})`));
+    const ul = el('ul');
+    d.newViolations.forEach((x) => { const li = el('li'); li.append(el('span', x.rule + ' : '), nodeLink(x.source), el('span', ' → '), nodeLink(x.target)); ul.append(li); });
+    side.append(ul);
+  }
+  if (d.newOrphans.length) list('Providers devenus inutilisés', d.newOrphans, (id) => nodeLink(id, id.split('#')[1] ?? id));
+  if (d.fixedCycles || d.fixedViolations) side.append(el('div', `Corrigés : ${d.fixedCycles} cycle(s), ${d.fixedViolations} violation(s).`, 'path'));
+  if (r.risky.length) {
+    side.append(el('h3', 'Points chauds modifiés'));
+    const ul = el('ul');
+    r.risky.forEach((f) => { const li = el('li'); li.append(nodeLink(f.file), el('span', ` — ${f.score}/100 (${f.impact} dép., ${f.churn} commits${f.inCycle ? ', cycle' : ''}${f.untested ? ', sans test' : ''})`)); ul.append(li); });
+    side.append(ul);
+  }
+  const row = el('div'); row.style.margin = '6px 0';
+  row.append(btn('Copier le résumé pour la PR', () => vscode.postMessage({ type: 'copy', text: reviewMd }), 'Markdown à coller dans la description de la pull request'));
+  side.append(row);
+}
+
+function renderRisk(): void {
+  const rows = [...riskD.entries()].sort((a, b) => b[1].score - a[1].score).slice(0, 10);
+  side.append(el('h3', 'Points chauds (risque 0-100)'));
+  side.append(el('div', 'Score = impact (40 %) + fréquence de modification sur 90 jours (30 %) + cycle (15 %) + aucun test qui l\'atteigne (15 %). Jaune → rouge dans le graphe.', 'path'));
+  const ul = el('ul');
+  rows.forEach(([id, r]) => { const li = el('li'); li.append(nodeLink(id), el('span', ` — ${r.score} (${r.impact} dép., ${r.churn} commits${r.inCycle ? ', cycle' : ''}${r.untested ? ', sans test' : ''})`)); ul.append(li); });
+  side.append(ul);
 }
 
 function renderSuggestions(): void {
@@ -637,11 +712,12 @@ function renderSide(): void {
   }
 
   const lg = el('div', undefined, 'legend');
+  lg.id = 'legend';
   const legend: [string, string][] = [
     ['Module', KIND_COLOR.module], ['Controller', KIND_COLOR.controller], ['Service', KIND_COLOR.service], ['Vue', KIND_COLOR.vue],
     ['Svelte', KIND_COLOR.svelte], ['Dossier', KIND_COLOR.folder], ['Package', KIND_COLOR.package], ['Autre', KIND_COLOR.other],
     ['Cycle', COL_CYCLE], ['Incident', COL_INCIDENT], ['Violation', COL_VIOLATION], ['Modifié', COL_CHANGED],
-    ['Impacté', COL_IMPACT], ['Ajouté', COL_ADDED], ['Supprimé', COL_REMOVED], ['Fichier actif', COL_ACTIVE],
+    ['Impacté', COL_IMPACT], ['Provider inutilisé', COL_ORPHAN], ['Ajouté', COL_ADDED], ['Supprimé', COL_REMOVED], ['Fichier actif', COL_ACTIVE],
   ];
   for (const [name, color] of legend) { const s = el('span'); const d = el('span', undefined, 'dot'); d.style.background = color; s.append(d, name); lg.append(s); }
   side.append(el('h3', 'Légende'), lg);
@@ -695,7 +771,7 @@ function exportView(fmt: string): void {
   if (fmt === 'mermaid') {
     const cls = (n: GNode): string | undefined =>
       n.id === activeFile ? 'active' : n.ghost || removedD.has(n.id) ? 'removed' : addedD.has(n.id) ? 'added' : changedD.has(n.id) ? 'changed' : cImpactD.has(n.id) ? 'impact'
-        : violNodes.has(n.id) ? 'violation' : incidentByNode.has(n.id) ? 'incident' : view!.cyclic.has(n.id) ? 'cycle' : undefined;
+        : violNodes.has(n.id) ? 'violation' : n.orphan ? 'orphan' : incidentByNode.has(n.id) ? 'incident' : view!.cyclic.has(n.id) ? 'cycle' : undefined;
     const mn: MNode[] = view.nodes.map((n) => ({ id: n.id, label: n.label, cls: cls(n) }));
     const ml: MLink[] = view.links.map((l) => {
       const k = lk(l.source, l.target);
@@ -735,8 +811,10 @@ $('m3d').addEventListener('click', () => setMode('3d'));
 $('arrange').addEventListener('click', arrange);
 $('scope').addEventListener('change', (e) => setScope((e.target as HTMLSelectElement).value as Scope));
 $('bdiff').addEventListener('click', () => vscode.postMessage({ type: 'requestDiff' }));
+$('breview').addEventListener('click', () => vscode.postMessage({ type: 'requestReview' }));
+$('brisk').addEventListener('click', () => { if (risk) { risk = null; render(true); } else vscode.postMessage({ type: 'requestRisk' }); });
 $('bcmp').addEventListener('click', () => vscode.postMessage({ type: 'requestCompare' }));
-$('bclear').addEventListener('click', () => { changes = null; compare = null; ai.diff = null; render(true); });
+$('bclear').addEventListener('click', () => { changes = null; compare = null; review = null; risk = null; ai.diff = null; render(true); });
 $('bsug').addEventListener('click', () => { ai.suggest = { loading: true }; renderSide(); vscode.postMessage({ type: 'suggest' }); });
 $<HTMLSelectElement>('export').addEventListener('change', (e) => {
   const s = e.target as HTMLSelectElement; const v = s.value; s.value = ''; if (v) exportView(v);
@@ -752,6 +830,7 @@ for (const k of ALL_KINDS) {
   const dot = el('span', undefined, 'dot'); dot.style.background = KIND_COLOR[k];
   lab.append(dot, KIND_LABEL[k], cb); $('kinds').append(lab); kindBoxes.push(cb);
 }
+$('forph').addEventListener('change', (e) => { filters.onlyOrphans = (e.target as HTMLInputElement).checked; scheduleRender(); });
 const fpath = $<HTMLInputElement>('fpath'), fshared = $<HTMLInputElement>('fshared'), fiso = $<HTMLInputElement>('fiso'), ftests = $<HTMLInputElement>('ftests');
 fpath.addEventListener('input', () => { filters.path = fpath.value; scheduleRender(); });
 fshared.addEventListener('input', () => { filters.maxShared = Math.max(0, parseInt(fshared.value, 10) || 0); scheduleRender(); });
@@ -787,10 +866,10 @@ window.addEventListener('message', (e) => {
       filters.hideTests = m.settings?.hideTests ?? true; ftests.checked = filters.hideTests;
       $<HTMLInputElement>('ffollow').checked = !!m.settings?.followActive;
     }
-    $('bdiff').toggleAttribute('disabled', !gitAvailable); $('bcmp').toggleAttribute('disabled', !gitAvailable);
-    if (!m.refresh) { selected = null; matches = new Set(); changes = null; compare = null; }
+    $('breview').toggleAttribute('disabled', !gitAvailable); $('bdiff').toggleAttribute('disabled', !gitAvailable); $('bcmp').toggleAttribute('disabled', !gitAvailable);
+    if (!m.refresh) { selected = null; matches = new Set(); changes = null; compare = null; review = null; risk = null; }
     // Après un rafraîchissement, les surcouches Git deviennent périmées : on les retire
-    else if (changes || compare) { changes = null; compare = null; }
+    else if (changes || compare || review) { changes = null; compare = null; review = null; }
     render(!!m.refresh);
   } else if (m.type === 'active') {
     const id = nodeForFile(m.file);
@@ -798,10 +877,16 @@ window.addEventListener('message', (e) => {
     applyStyles();
     if (id && $<HTMLInputElement>('ffollow').checked && graph) focusNode(id);
   } else if (m.type === 'changes') {
-    changes = m.set as ChangeSet; compare = null; selected = null; ai.diff = null;
+    changes = m.set as ChangeSet; compare = null; review = null; selected = null; ai.diff = null;
     render(true);
+  } else if (m.type === 'review') {
+    review = m.review as Review; reviewMd = m.markdown; changes = m.set as ChangeSet; compare = null; selected = null; ai.diff = null;
+    render(true);
+  } else if (m.type === 'risk') {
+    risk = m.scores as Record<string, RiskInfo>;
+    if (scope !== 'files') setScope('files'); else render(true);
   } else if (m.type === 'compare') {
-    compare = m.data as CompareResult; changes = null; selected = null; render(true);
+    compare = m.data as CompareResult; changes = null; review = null; selected = null; render(true);
   } else if (m.type === 'ai') {
     const box: AiBox = m.error ? { error: m.error, copied: m.copied } : { text: m.text, model: m.model };
     if (m.kind === 'summary') ai.summaries.set(m.scope + ':' + m.id, box);

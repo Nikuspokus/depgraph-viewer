@@ -13,7 +13,7 @@ async function load(entry, name) {
   return (await import(pathToFileURL(file).href)).default;
 }
 let passed = 0;
-const ok = (name, fn) => Promise.resolve(fn()).then(() => { passed++; console.log('  ✓', name); }, (e) => { console.error('  ✗', name, '\n   ', e.message); process.exitCode = 1; });
+const ok = (name, fn) => Promise.resolve().then(fn).then(() => { passed++; console.log('  ✓', name); }, (e) => { console.error('  ✗', name, '\n   ', e.message); process.exitCode = 1; });
 
 const scanner = await load('src/scanner.ts', 'scanner');
 const rules = await load('src/rules.ts', 'rules');
@@ -193,5 +193,119 @@ await ok('ia : accès refusé par VS Code = message clair', async () => {
   assert.equal(r.reason, 'error'); assert.match(r.message, /refusé/);
 });
 Module._load = origLoad;
+
+console.log('NestJS : injections et providers inutilisés');
+const nestG = scanner.scan('test/fixtures/nest-app');
+const NC = nestG.nestClasses;
+const cid = (f, n) => `src/${f}#${n}`;
+const node = (name) => NC.nodes.find((n) => n.label === name);
+await ok('classes : modules, controller et providers détectés avec leur rôle', () => {
+  assert.equal(node('UsersController').role, 'controller');
+  assert.equal(node('UsersService').role, 'provider');
+  assert.equal(node('UsersModule').role, 'module');
+  assert.equal(node("UsersService").line, 8);
+});
+await ok('injection : constructeur (type), @Inject(forwardRef) et @Inject(jeton) sont résolus', () => {
+  const inj = NC.links.filter((l) => l.kind === 'inject');
+  const has2 = (a, b) => inj.some((l) => l.source === node(a).id && l.target === node(b).id);
+  assert.ok(has2('UsersController', 'UsersService'));
+  assert.ok(has2('UsersController', 'SmtpMailer'), 'jeton MAILER -> SmtpMailer');
+  assert.ok(has2('UsersService', 'UsersRepository'));
+  assert.ok(has2('UsersService', 'AuthService'), 'forwardRef');
+  assert.ok(has2('AuthService', 'UsersService'));
+});
+await ok('injection : un type de librairie (ModuleRef) ne crée pas de lien', () => {
+  assert.equal(NC.links.filter((l) => l.source === node('UsersService').id).filter((l) => l.kind === 'inject').length, 2);
+});
+await ok('déclaration : le module relie ses providers et controllers', () => {
+  const dec = (a, b) => NC.links.some((l) => l.kind === 'declare' && l.source === node(a).id && l.target === node(b).id);
+  assert.ok(dec('UsersModule', 'UsersService'));
+  assert.ok(dec('UsersModule', 'UsersController'));
+  assert.ok(dec('UsersModule', 'SmtpMailer'), 'via { provide, useClass }');
+});
+await ok('cycle d\'injection UsersService <-> AuthService détecté (hors liens de déclaration)', () => {
+  assert.ok(NC.cycles.some((c) => c.includes(node('UsersService').id) && c.includes(node('AuthService').id)));
+});
+await ok('orphelins : seul UnusedService est signalé', () => {
+  const orphans = NC.nodes.filter((n) => n.orphan).map((n) => n.label).sort();
+  assert.deepEqual(orphans, ['UnusedService']);
+});
+await ok('orphelins : exporté, référencé (ModuleRef), garde APP_GUARD, @Cron et jeton ne sont pas signalés', () => {
+  for (const n of ['ExportedOnlyService', 'ReferencedService', 'RolesGuard', 'CleanupService', 'SmtpMailer', 'UsersRepository']) {
+    assert.ok(!node(n).orphan, n);
+  }
+});
+await ok('orphelins : un test qui utilise le provider ne le rend pas « utilisé »', () => {
+  assert.ok(node('UnusedService').orphan);
+});
+
+// ---------- Revue PR, nouveaux problèmes, risque ----------
+console.log('\nRevue PR');
+const review = await load('src/review.ts', 'review');
+const repo2 = mkdtempSync(path.join(out, 'repo2-'));
+const git2 = (...a) => execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@t', ...a], { cwd: repo2, stdio: 'pipe' }).toString();
+const put2 = (f, c) => { fs.mkdirSync(path.dirname(path.join(repo2, f)), { recursive: true }); fs.writeFileSync(path.join(repo2, f), c); };
+git2('init', '-q', '-b', 'main');
+put2('package.json', '{"name":"root","workspaces":["packages/*"]}');
+put2('packages/app/package.json', '{"name":"@r/app","dependencies":{"@r/lib":"1"}}');
+put2('packages/lib/package.json', '{"name":"@r/lib"}');
+put2('packages/other/package.json', '{"name":"@r/other"}');
+put2('packages/lib/src/index.ts', "import './old-a'; export const x = 1;");
+put2('packages/lib/src/old-a.ts', "import './old-b'; export const a = 1;");
+put2('packages/lib/src/old-b.ts', "import './old-a'; export const b = 1;"); // cycle déjà présent (ancienne dette)
+put2('packages/app/src/main.ts', "import '../../lib/src/index'; export const m = 1;");
+put2('packages/app/src/main.spec.ts', "import './main';");
+put2('.depgraph-rules.json', JSON.stringify({ rules: [{ name: 'lib ne dépend pas de app', from: 'packages/lib/**', notTo: 'packages/app/**' }] }));
+git2('add', '-A'); git2('commit', '-q', '-m', 'base');
+git2('checkout', '-q', '-b', 'feature');
+put2('packages/lib/src/new-a.ts', "import './new-b'; export const na = 1;");
+put2('packages/lib/src/new-b.ts', "import './new-a'; import '../../app/src/main'; export const nb = 1;"); // nouveau cycle + violation
+put2('packages/lib/src/index.ts', "import './old-a'; import './new-a'; export const x = 2;");
+git2('add', '-A'); git2('commit', '-q', '-m', 'feat');
+const rv = await review.buildReview(repo2, { kind: 'branch' }, {});
+await ok('revue : seuls les nouveaux cycles sont signalés (l\'ancienne dette est ignorée)', () => {
+  assert.equal(rv.delta.newCycles.length, 1);
+  // new-b → main → index → new-a → new-b : le nouveau cycle englobe ces 4 fichiers, pas l'ancien (old-a/old-b)
+  assert.deepEqual(rv.delta.newCycles[0].sort(), ['packages/app/src/main.ts', 'packages/lib/src/index.ts', 'packages/lib/src/new-a.ts', 'packages/lib/src/new-b.ts']);
+});
+await ok('revue : seules les nouvelles violations sont signalées', () => {
+  assert.equal(rv.delta.newViolations.length, 1);
+  assert.equal(rv.delta.newViolations[0].source, 'packages/lib/src/new-b.ts');
+});
+await ok('revue : fichiers modifiés, impactés et tests à relancer (via le test de main.ts)', () => {
+  assert.deepEqual(rv.changed.sort(), ['packages/lib/src/index.ts', 'packages/lib/src/new-a.ts', 'packages/lib/src/new-b.ts']);
+  assert.ok(rv.impacted.includes('packages/app/src/main.ts'));
+  assert.deepEqual(rv.tests, ['packages/app/src/main.spec.ts']);
+});
+await ok('revue : projets touchés et projets dépendants à retester', () => {
+  assert.deepEqual(rv.projects.changed, ['packages/lib']);
+  assert.ok(rv.projects.impacted.includes('packages/app'));
+  assert.ok(!rv.projects.impacted.includes('packages/other'));
+});
+await ok('revue : résumé Markdown prêt pour une PR', () => {
+  const md = review.reviewMarkdown(rv);
+  assert.match(md, /Nouveaux problèmes/); assert.match(md, /new-a\.ts/); assert.match(md, /Projets dépendants/); assert.match(md, /main\.spec\.ts/);
+});
+await ok('revue : mode « non commité » sans modification = rien de nouveau', async () => {
+  const r2 = await review.buildReview(repo2, { kind: 'working' }, {});
+  assert.equal(r2.changed.length, 0); assert.equal(r2.delta.newCycles.length, 0); assert.equal(r2.delta.newViolations.length, 0);
+});
+await ok('risque : plus un fichier est importé, modifié, dans un cycle et sans test, plus le score monte', async () => {
+  const g = scanner.scan(repo2);
+  const churn = await gitm.churnByFile(repo2);
+  assert.ok(churn.get('packages/lib/src/index.ts') >= 2, 'index.ts modifié dans 2 commits');
+  const risk = review.computeRisk(g.files, churn);
+  const idx = risk.get('packages/lib/src/index.ts'), main = risk.get('packages/app/src/main.ts');
+  assert.ok(idx.score > main.score);
+  assert.equal(main.untested, false); // main.spec.ts l'atteint
+  assert.equal(risk.get('packages/lib/src/old-a.ts').inCycle, true);
+  assert.ok([...risk.values()].every((r) => r.score >= 0 && r.score <= 100));
+});
+await ok('nouveaux providers inutilisés : détectés par rapport à la base', async () => {
+  const base = scanner.scan('test/fixtures/nest-app');
+  const cur = JSON.parse(JSON.stringify(base));
+  cur.nestClasses.nodes.find((n) => n.label === 'UsersRepository').orphan = true;
+  assert.deepEqual(review.newProblems(cur, base).newOrphans.map((i) => i.split('#')[1]), ['UsersRepository']);
+});
 
 console.log(`\n${passed} test(s) réussi(s)`);

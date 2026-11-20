@@ -23,9 +23,15 @@ Couleurs : module Nest (bleu), controller (violet), service (turquoise), Vue (ve
 
 Cases par type de fichier, champ de chemin (`auth, users, !shared` : mots séparés par des virgules, `!` exclut), « Masquer importés par ≥ N », « Masquer isolés », « Masquer tests » (actif par défaut, `depgraph.hideTestsByDefault`) et **Regrouper** par dossier (niveau 1 à 4 ; clic droit sur un dossier pour le déplier). Les filtres ne changent que l'affichage : les impacts sont toujours calculés sur le projet entier.
 
+## Avant d'ouvrir une PR
+
+- **Revue PR** : choisis « branche courante vs main », « non commité » ou « depuis un tag/commit ». Tu obtiens les fichiers modifiés et impactés, les **tests à relancer**, les **projets** du monorepo à retester, les **nouveaux** cycles, violations de règles et providers inutilisés (comparés à la base : l'ancienne dette n'est pas comptée), les **points chauds** modifiés, et un **résumé Markdown** à coller dans la description de la PR.
+- **Points chauds** : colore chaque fichier de jaune à rouge selon un score de risque de 0 à 100 = impact (40 %, fichiers qui en dépendent) + churn (30 %, nombre de commits sur 90 jours) + cycle (15 %) + aucun test qui l'atteigne (15 %).
+
 ## Vues
 
-Le sélecteur **Vue** bascule entre **Fichiers**, **Modules NestJS** (décorateurs `@Module` : imports entre modules, providers, controllers, exports ; clic droit = ouvre la ligne du décorateur) et **Packages** (monorepo : dépendances entre packages, détecté dès 2 `package.json`).
+
+Le sélecteur **Vue** bascule entre **Fichiers**, **Modules NestJS** (décorateurs `@Module` : imports entre modules, providers, controllers, exports ; clic droit = ouvre la ligne du décorateur), **NestJS : modules + classes** (en plus : les `@Controller` et `@Injectable`, les liens de déclaration module → classe, et les **injections** lues dans les constructeurs, y compris `@Inject(forwardRef(...))` et `@Inject('JETON')` résolu vers sa classe) et **Packages** (monorepo : dépendances entre packages, détecté dès 2 `package.json`).
 
 ## Fonctions
 
@@ -35,6 +41,10 @@ Le sélecteur **Vue** bascule entre **Fichiers**, **Modules NestJS** (décorateu
 - **Comparer…** le projet actuel à une branche, un tag ou un commit : nœuds/liens ajoutés en vert, supprimés en rouge (fantômes).
 - **Exporter** la vue en Mermaid (`.md`, s'affiche dans GitHub), SVG ou PNG.
 - **IA** (résumer un fichier, suggérer des simulations, analyser le risque d'un diff) : utilise les modèles de VS Code (GitHub Copilot), **sans clé API**. Sans modèle disponible, ou avec `depgraph.aiProvider = copy`, le prompt est copié dans le presse-papiers pour le coller dans Claude. Une confirmation est demandée avant le premier envoi de code.
+
+### Providers inutilisés
+
+Dans la vue « modules + classes », un provider est coloré en brun et souligné dans l'éditeur (`depgraph.diagnostics`) s'il n'est injecté nulle part, ni exporté par son module, ni référencé dans un autre fichier hors tests, ni fourni via `APP_GUARD`/`APP_PIPE`…, et n'est ni un guard/interceptor/pipe/filter/resolver…, ni une classe avec d'autres décorateurs (`@Cron`, `@OnEvent`…). C'est une **heuristique** (analyse statique) : vérifie avant de supprimer. Le filtre « Seulement providers inutilisés » les isole.
 
 ## Règles d'architecture
 
@@ -54,6 +64,7 @@ Les violations apparaissent en violet (liens, nœuds, panneau latéral). Exemple
 ```bash
 curl -sL https://github.com/Nikuspokus/depgraph-viewer/releases/latest/download/cli.js -o depgraph-check.js
 node depgraph-check.js . --fail-on-cycles   # code 1 si violation (ou cycle)
+node depgraph-check.js . --base origin/main  # ne compte que les NOUVEAUX problèmes de la branche
 ```
 
 ## Mises à jour

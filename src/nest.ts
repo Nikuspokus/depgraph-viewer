@@ -3,6 +3,7 @@ import * as path from 'path';
 import * as ts from 'typescript';
 import { GLink, GNode, Layer } from './shared/types';
 import { findCycles } from './shared/graph';
+import { ClassInfo, namesOf, parseSource, readClasses, readImportSpecs } from './ts-read';
 
 interface RawModule {
   id: string;
@@ -13,30 +14,27 @@ interface RawModule {
   providers: string[];
   controllers: string[];
   exports: string[];
+  providerEntries: ProviderEntry[];
   importSpecs: Map<string, string>; // nom local -> chemin d'import (pour départager des noms identiques)
 }
 
-/** Noms de classes référencés par une expression : `Foo`, `Foo.forRoot()`, `forwardRef(() => Foo)`. */
-function namesOf(e: ts.Expression): string[] {
-  if (ts.isIdentifier(e)) return [e.text];
-  if (ts.isPropertyAccessExpression(e)) return namesOf(e.expression);
-  if (ts.isParenthesizedExpression(e) || ts.isAsExpression(e) || ts.isNonNullExpression(e)) return namesOf(e.expression);
-  if (ts.isCallExpression(e)) {
-    if (ts.isIdentifier(e.expression) && e.expression.text === 'forwardRef') {
-      const a = e.arguments[0];
-      if (a && (ts.isArrowFunction(a) || ts.isFunctionExpression(a))) {
-        const body = a.body;
-        if (ts.isBlock(body)) {
-          const ret = body.statements.find(ts.isReturnStatement);
-          return ret?.expression ? namesOf(ret.expression) : [];
-        }
-        return namesOf(body);
-      }
-      return [];
+/** Un élément du tableau `providers` : la classe fournie et/ou le jeton qui la désigne. */
+interface ProviderEntry { token: string | null; classes: string[] }
+
+function providerEntry(e: ts.Expression): ProviderEntry {
+  if (ts.isIdentifier(e)) return { token: e.text, classes: [e.text] };
+  if (ts.isObjectLiteralExpression(e)) {
+    let token: string | null = null;
+    const classes: string[] = [];
+    for (const p of e.properties) {
+      if (!ts.isPropertyAssignment(p)) continue;
+      const k = p.name.getText();
+      if (k === 'provide') token = ts.isIdentifier(p.initializer) || ts.isStringLiteralLike(p.initializer) ? p.initializer.text : null;
+      else if (k === 'useClass' || k === 'useExisting') classes.push(...namesOf(p.initializer));
     }
-    return namesOf(e.expression);
+    return { token, classes };
   }
-  return [];
+  return { token: null, classes: [] };
 }
 
 /** Nom affichable d'un provider : `UsersService` ou `{ provide: TOKEN, useClass: … }`. */
@@ -63,36 +61,46 @@ function listOf(obj: ts.ObjectLiteralExpression, key: string): ts.Expression[] {
   return [];
 }
 
+const SPECIAL_NAME = /(Guard|Interceptor|Pipe|Filter|Strategy|Middleware|Resolver|Gateway|Processor|Consumer|Listener|Subscriber|Handler|Scheduler|Task|Job|Seeder|Command|Adapter)$/;
+const TEST_FILE = /\.(spec|test|e2e-spec)\.[cm]?[jt]s$|(^|\/)(__tests__|__mocks__)\//;
+const readable = (f: string) => /\.[cm]?[jt]s$/.test(f);
+
+export interface NestResult {
+  modules: Layer; // un nœud par @Module
+  classes: Layer; // modules + controllers + providers, liens d'import / de déclaration / d'injection
+}
+
 /**
- * Lit les décorateurs `@Module({ imports, providers, controllers, exports })` pour construire le graphe
- * des modules NestJS (le vrai graphe d'injection de dépendances au niveau module).
+ * Lit le projet NestJS :
+ * - `@Module({ imports, providers, controllers, exports })` pour le graphe des modules ;
+ * - `@Controller` / `@Injectable` et les paramètres de constructeur pour le graphe des injections
+ *   (l'injection de dépendances : Nest fournit lui-même à une classe les instances dont elle a besoin).
  */
 export function parseNest(
   root: string,
   files: string[],
   resolveSpec: (from: string, spec: string) => string | null,
-): Layer {
+): NestResult {
   const raws: RawModule[] = [];
+  const texts = new Map<string, string>();
+  const classesByFile = new Map<string, { sf: ts.SourceFile; infos: ClassInfo[]; specs: Map<string, string> }>();
 
   for (const file of files) {
-    if (!/\.[cm]?[jt]s$/.test(file)) continue;
+    if (!readable(file)) continue;
     let text: string;
     try {
       const abs = path.join(root, file);
       if (fs.statSync(abs).size > 500_000) continue;
       text = fs.readFileSync(abs, 'utf8');
     } catch { continue; }
-    if (!text.includes('@Module(')) continue;
+    texts.set(file, text);
+    if (!/@(Module|Controller|Injectable)\b/.test(text)) continue;
 
-    const sf = ts.createSourceFile(file, text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-    const importSpecs = new Map<string, string>();
-    for (const st of sf.statements) {
-      if (!ts.isImportDeclaration(st) || !ts.isStringLiteral(st.moduleSpecifier) || !st.importClause) continue;
-      const spec = st.moduleSpecifier.text;
-      if (st.importClause.name) importSpecs.set(st.importClause.name.text, spec);
-      const nb = st.importClause.namedBindings;
-      if (nb && ts.isNamedImports(nb)) for (const el of nb.elements) importSpecs.set(el.name.text, spec);
-    }
+    const sf = parseSource(file, text);
+    const importSpecs = readImportSpecs(sf);
+    const infos = readClasses(sf);
+    classesByFile.set(file, { sf, infos, specs: importSpecs });
+    if (!text.includes('@Module(')) continue;
 
     let countInFile = 0;
     for (const st of sf.statements) {
@@ -104,15 +112,17 @@ export function parseNest(
         const arg = ex.arguments[0];
         const obj = arg && ts.isObjectLiteralExpression(arg) ? arg : undefined;
         const name = st.name?.text ?? 'default';
+        const providerExprs = obj ? listOf(obj, 'providers') : [];
         raws.push({
           id: countInFile === 0 ? file : `${file}#${name}`,
           file,
           name,
           line: sf.getLineAndCharacterOfPosition(d.getStart()).line + 1,
           refs: obj ? listOf(obj, 'imports').flatMap(namesOf) : [],
-          providers: obj ? listOf(obj, 'providers').map(providerName).filter((x): x is string => !!x) : [],
+          providers: providerExprs.map(providerName).filter((x): x is string => !!x),
           controllers: obj ? listOf(obj, 'controllers').flatMap(namesOf) : [],
           exports: obj ? listOf(obj, 'exports').flatMap(namesOf) : [],
+          providerEntries: providerExprs.map(providerEntry),
           importSpecs,
         });
         countInFile++;
@@ -120,6 +130,7 @@ export function parseNest(
     }
   }
 
+  // ---- couche « modules » ----
   const byName = new Map<string, RawModule[]>();
   for (const m of raws) byName.set(m.name, [...(byName.get(m.name) ?? []), m]);
 
@@ -141,7 +152,7 @@ export function parseNest(
       const key = `${m.id}\u0000${target.id}`;
       if (seen.has(key)) continue;
       seen.add(key);
-      links.push({ source: m.id, target: target.id });
+      links.push({ source: m.id, target: target.id, kind: 'import' });
     }
     return {
       id: m.id,
@@ -150,6 +161,7 @@ export function parseNest(
       kind: 'module' as const,
       file: m.file,
       line: m.line,
+      role: 'module' as const,
       nest: {
         name: m.name,
         providers: [...new Set(m.providers)],
@@ -159,6 +171,101 @@ export function parseNest(
       },
     };
   });
+  const modules: Layer = { nodes, links: links.map((l) => ({ source: l.source, target: l.target })), cycles: findCycles(nodes.map((n) => n.id), links) };
 
-  return { nodes, links, cycles: findCycles(nodes.map((n) => n.id), links) };
+  // ---- couche « modules + classes » ----
+  const classNodes: GNode[] = [];
+  const classInfoById = new Map<string, ClassInfo & { file: string }>();
+  const byClassName = new Map<string, string[]>();
+  for (const [file, { infos }] of classesByFile) {
+    for (const c of infos) {
+      const isCtrl = c.decorators.includes('Controller');
+      const isProv = c.decorators.includes('Injectable');
+      if (!isCtrl && !isProv) continue;
+      const id = `${file}#${c.name}`;
+      classInfoById.set(id, { ...c, file });
+      byClassName.set(c.name, [...(byClassName.get(c.name) ?? []), id]);
+      classNodes.push({
+        id, label: c.name, dir: path.posix.dirname(file), kind: isCtrl ? 'controller' : 'service',
+        file, line: c.line, role: isCtrl ? 'controller' : 'provider', isTest: TEST_FILE.test(file) || undefined,
+      });
+    }
+  }
+  const resolveClass = (fromFile: string, specs: Map<string, string>, name: string): string | null => {
+    const spec = specs.get(name);
+    if (spec) {
+      const f = resolveSpec(fromFile, spec);
+      if (f && classInfoById.has(`${f}#${name}`)) return `${f}#${name}`;
+    }
+    if (classInfoById.has(`${fromFile}#${name}`)) return `${fromFile}#${name}`;
+    const c = byClassName.get(name);
+    return c?.length === 1 ? c[0] : null;
+  };
+
+  const cLinks: GLink[] = [...links];
+  const cSeen = new Set(cLinks.map((l) => `${l.source}\u0000${l.target}`));
+  const add = (source: string, target: string, kind: 'declare' | 'inject') => {
+    if (source === target) return;
+    const k = `${source}\u0000${target}`;
+    if (cSeen.has(k)) return;
+    cSeen.add(k);
+    cLinks.push({ source, target, kind });
+  };
+
+  // jeton -> classes qui le fournissent ; classes utilisées par des jetons du framework (APP_GUARD…)
+  const tokenToClasses = new Map<string, string[]>();
+  const frameworkUsed = new Set<string>();
+  const exported = new Set<string>();
+  for (const m of raws) {
+    for (const e of m.providerEntries) {
+      const ids = e.classes.map((n) => resolveClass(m.file, m.importSpecs, n)).filter((x): x is string => !!x);
+      if (e.token) tokenToClasses.set(e.token, [...(tokenToClasses.get(e.token) ?? []), ...ids]);
+      if (e.token?.startsWith('APP_')) ids.forEach((i) => frameworkUsed.add(i));
+    }
+    const moduleId = m.id;
+    for (const n of [...m.providerEntries.flatMap((e) => e.classes), ...m.controllers]) {
+      const id = resolveClass(m.file, m.importSpecs, n);
+      if (id) add(moduleId, id, 'declare');
+    }
+    for (const n of m.exports) { const id = resolveClass(m.file, m.importSpecs, n); if (id) exported.add(id); }
+  }
+
+  for (const [id, c] of classInfoById) {
+    const specs = classesByFile.get(c.file)!.specs;
+    for (const p of c.ctor) {
+      let targets: string[] = [];
+      if (p.type) { const t = resolveClass(c.file, specs, p.type); if (t) targets = [t]; }
+      else if (p.token) targets = tokenToClasses.get(p.token) ?? [];
+      for (const t of targets) add(id, t, 'inject');
+    }
+  }
+
+  // ---- providers probablement inutilisés ----
+  const stripImports = (t: string) =>
+    t.replace(/^\s*import[\s\S]*?from\s+['"][^'"]+['"];?\s*$/gm, '').replace(/^\s*export\s[^;]*?from\s+['"][^'"]+['"];?\s*$/gm, '');
+  const scanText: { file: string; text: string }[] = [];
+  for (const [file, text] of texts) {
+    if (TEST_FILE.test(file) || /\.module\.[cm]?[jt]s$/.test(file)) continue;
+    scanText.push({ file, text: stripImports(text) });
+  }
+  const injected = new Set(cLinks.filter((l) => l.kind === 'inject').map((l) => l.target));
+  for (const n of classNodes) {
+    if (n.role !== 'provider' || n.isTest) continue;
+    const c = classInfoById.get(n.id)!;
+    const special =
+      SPECIAL_NAME.test(c.name) || c.decorators.some((d) => d !== 'Injectable') ||
+      c.methodDecorators.length > 0 || c.implementsNames.length > 0;
+    if (injected.has(n.id) || exported.has(n.id) || frameworkUsed.has(n.id) || special) continue;
+    const re = new RegExp(`\\b${c.name}\\b`);
+    if (scanText.some((t) => t.file !== c.file && re.test(t.text))) continue;
+    n.orphan = true;
+  }
+
+  const all = [...nodes, ...classNodes];
+  const classes: Layer = {
+    nodes: all,
+    links: cLinks,
+    cycles: findCycles(all.map((n) => n.id), cLinks.filter((l) => l.kind !== 'declare')),
+  };
+  return { modules, classes };
 }
