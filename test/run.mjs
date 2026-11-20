@@ -190,7 +190,7 @@ await ok('ia : consentement refusé = rien n\'est envoyé', async () => {
 await ok('ia : accès refusé par VS Code = message clair', async () => {
   resetState(); state.models = [model('claude-sonnet', [], Object.assign(new Error('x'), { code: 'NoPermissions' }))];
   const r = await ai.askAi(ctxOf(true), P, 'test');
-  assert.equal(r.reason, 'error'); assert.match(r.message, /refusé/);
+  assert.equal(r.reason, 'copied'); assert.match(r.message, /refusé/); // échec Copilot → repli sur la copie, avec la raison
 });
 
 console.log('\nIA : ordre Copilot puis Claude (CLI)');
